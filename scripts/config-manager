@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+MANIFEST_PATH = ROOT / "config" / "config-manifest.json"
+DEFAULT_ENV_PATH = ROOT / ".env"
+DEFAULT_EXAMPLE_PATH = ROOT / ".env.example"
+ASSIGNMENT = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$")
+SENSITIVE_MARKERS = ("SECRET", "TOKEN", "PASSWORD", "PASS", "PRIVATE_KEY", "API_KEY", "CREDENTIAL", "AUTH")
+
+
+def load_manifest() -> list[dict[str, Any]]:
+    data = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    return list(data.get("variables", []))
+
+
+def manifest_by_key(variables: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {str(variable["key"]): variable for variable in variables}
+
+
+def is_sensitive(variable: dict[str, Any]) -> bool:
+    key = str(variable["key"])
+    return bool(variable.get("sensitive")) or any(marker in key.upper() for marker in SENSITIVE_MARKERS)
+
+
+def example_value(variable: dict[str, Any]) -> str:
+    if not is_sensitive(variable):
+        return str(variable.get("default", ""))
+    if variable.get("required"):
+        return "changeme"
+    return ""
+
+
+def format_env_value(value: str) -> str:
+    if value == "" or re.match(r"^[A-Za-z0-9_./:@+-]+$", value):
+        return value
+    return json.dumps(value)
+
+
+def parse_env(path: Path) -> tuple[dict[str, str], list[str]]:
+    if not path.exists():
+        return {}, []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    values: dict[str, str] = {}
+    for line in lines:
+        match = ASSIGNMENT.match(line)
+        if match:
+            values[match.group(1)] = match.group(2).strip()
+    return values, lines
+
+
+def comments_for(variable: dict[str, Any]) -> list[str]:
+    comments = [f"# {variable['description']}"]
+    local_values = variable.get("local_values") or []
+    if local_values:
+        comments.append(f"# Local values: {', '.join(str(value) for value in local_values)}")
+    source = variable.get("source")
+    if source:
+        comments.append(f"# Source: {source}")
+    return comments[:5]
+
+
+def render_block(variable: dict[str, Any], value: str) -> list[str]:
+    return [*comments_for(variable), f"{variable['key']}={format_env_value(value)}"]
+
+
+def env_path(raw_path: str | None) -> Path:
+    if raw_path is None:
+        return DEFAULT_ENV_PATH
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = ROOT / path
+    return path
+
+
+def write_lines(path: Path, lines: list[str], dry_run: bool) -> None:
+    content = "\n".join(lines).rstrip() + "\n"
+    if dry_run:
+        print(f"would write {path.relative_to(ROOT)}")
+        print(content, end="")
+        return
+    path.write_text(content, encoding="utf-8")
+
+
+def ensure_file(
+    path: Path,
+    variables: list[dict[str, Any]],
+    *,
+    example: bool,
+    dry_run: bool,
+    overrides: dict[str, str] | None = None,
+    interactive: bool = False,
+) -> None:
+    overrides = overrides or {}
+    existing_values, lines = parse_env(path)
+    if not lines:
+        lines = ["# Generated from config/config-manifest.json. Review values before relying on them."]
+
+    keys_in_file = set(existing_values)
+    changed = not path.exists()
+    for variable in variables:
+        key = str(variable["key"])
+        value = overrides.get(key, existing_values.get(key, example_value(variable) if example else str(variable.get("default", ""))))
+        if interactive and not example:
+            prompt = f"{key} [{value}]: "
+            response = input(prompt).strip()
+            if response:
+                value = response
+        if key in keys_in_file:
+            if example and is_sensitive(variable):
+                replacement = f"{key}={format_env_value(example_value(variable))}"
+                for index, line in enumerate(lines):
+                    match = ASSIGNMENT.match(line)
+                    if match and match.group(1) == key and line != replacement:
+                        lines[index] = replacement
+                        changed = True
+            continue
+        if lines and lines[-1] != "":
+            lines.append("")
+        lines.extend(render_block(variable, value))
+        changed = True
+
+    if changed:
+        write_lines(path, lines, dry_run)
+    else:
+        print(f"{path.relative_to(ROOT)} is up to date")
+
+
+def command_init(args: argparse.Namespace) -> int:
+    variables = load_manifest()
+    overrides: dict[str, str] = {}
+    target_env = env_path(args.env_file)
+    if args.ci:
+        target_env = env_path(args.env_file or ".env.ci")
+        overrides = {"HINDSIGHT_DB": "./.hindsight/ci-hindsight.db", "HINDSIGHT_ENV": "ci"}
+
+    ensure_file(DEFAULT_EXAMPLE_PATH, variables, example=True, dry_run=args.dry_run)
+    if not args.example_only:
+        ensure_file(target_env, variables, example=False, dry_run=args.dry_run, overrides=overrides, interactive=args.interactive)
+        print(f"review {target_env.relative_to(ROOT)} before relying on these values")
+    return 0
+
+
+def command_edit(args: argparse.Namespace) -> int:
+    command_init(argparse.Namespace(dry_run=args.dry_run, interactive=False, ci=False, env_file=args.env_file, example_only=False))
+    if args.dry_run:
+        return 0
+    editor = os.environ.get("EDITOR")
+    if not editor:
+        print("EDITOR is not set; set EDITOR to open .env from this target.", file=sys.stderr)
+        return 2
+    subprocess.run([*shlex.split(editor), str(env_path(args.env_file))], check=True)
+    return 0
+
+
+def command_status(args: argparse.Namespace) -> int:
+    variables = load_manifest()
+    expected = manifest_by_key(variables)
+    path = env_path(args.env_file)
+    values, _ = parse_env(path)
+    print(f"config file: {path.relative_to(ROOT)}")
+    if not path.exists():
+        print("status: missing")
+        return 1
+
+    missing = [key for key in expected if key not in values]
+    empty_required = [key for key, variable in expected.items() if variable.get("required") and values.get(key, "") == ""]
+    undocumented = sorted(set(values) - set(expected))
+
+    if not missing and not empty_required and not undocumented:
+        print("status: ok")
+        return 0
+    if missing:
+        print("missing: " + ", ".join(missing))
+    if empty_required:
+        print("empty required: " + ", ".join(empty_required))
+    if undocumented:
+        print("undocumented: " + ", ".join(undocumented))
+    return 1
+
+
+def command_update(args: argparse.Namespace) -> int:
+    variables = load_manifest()
+    expected = manifest_by_key(variables)
+    if args.key not in expected:
+        print(f"{args.key} is not documented in config/config-manifest.json", file=sys.stderr)
+        return 2
+
+    path = env_path(args.env_file)
+    command_init(argparse.Namespace(dry_run=args.dry_run, interactive=False, ci=False, env_file=args.env_file, example_only=False))
+    values, lines = parse_env(path)
+    updated = False
+    replacement = f"{args.key}={format_env_value(args.value)}"
+    for index, line in enumerate(lines):
+        match = ASSIGNMENT.match(line)
+        if match and match.group(1) == args.key:
+            lines[index] = replacement
+            updated = True
+            break
+    if not updated:
+        if lines and lines[-1] != "":
+            lines.append("")
+        lines.extend(render_block(expected[args.key], args.value))
+    write_lines(path, lines, args.dry_run)
+    if not args.dry_run:
+        print(f"updated {args.key} in {path.relative_to(ROOT)}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Manage local Hindsight environment configuration.")
+    parser.add_argument("--dry-run", action="store_true", help="Preview changes without writing files.")
+    subparsers = parser.add_subparsers(dest="command")
+
+    init_parser = subparsers.add_parser("init", help="Create or refresh .env and .env.example.")
+    init_parser.add_argument("--interactive", action="store_true", help="Prompt for local values.")
+    init_parser.add_argument("--ci", action="store_true", help="Use CI defaults and .env.ci unless --env-file is set.")
+    init_parser.add_argument("--env-file", help="Environment file to create or refresh.")
+    init_parser.add_argument("--example-only", action="store_true", help="Only refresh .env.example.")
+    init_parser.set_defaults(func=command_init)
+
+    edit_parser = subparsers.add_parser("edit", help="Open .env in EDITOR.")
+    edit_parser.add_argument("--env-file", help="Environment file to edit.")
+    edit_parser.set_defaults(func=command_edit)
+
+    status_parser = subparsers.add_parser("status", help="Report configuration health.")
+    status_parser.add_argument("--env-file", help="Environment file to inspect.")
+    status_parser.set_defaults(func=command_status)
+
+    update_parser = subparsers.add_parser("update", help="Update one key in .env.")
+    update_parser.add_argument("-k", "--key", required=True, help="Configuration key to update.")
+    update_parser.add_argument("-v", "--value", required=True, help="Configuration value to write.")
+    update_parser.add_argument("--env-file", help="Environment file to update.")
+    update_parser.set_defaults(func=command_update)
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    if not hasattr(args, "func"):
+        args = parser.parse_args(["init"])
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

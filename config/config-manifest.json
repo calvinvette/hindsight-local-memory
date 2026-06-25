@@ -1,0 +1,28 @@
+{
+    "variables": [
+        {
+            "key": "HINDSIGHT_DB",
+            "description": "SQLite database path used by local Makefile and CLI workflows.",
+            "default": "./.hindsight/hindsight.db",
+            "local_values": [
+                "./.hindsight/hindsight.db",
+                "/absolute/path/to/hindsight.db"
+            ],
+            "required": true,
+            "sensitive": false,
+            "source": "Project default used by demo and CLI examples."
+        },
+        {
+            "key": "HINDSIGHT_ENV",
+            "description": "Environment label for local automation and CI-generated config.",
+            "default": "local",
+            "local_values": [
+                "local",
+                "ci"
+            ],
+            "required": false,
+            "sensitive": false,
+            "source": "Set to ci for CI helper config."
+        }
+    ]
+}

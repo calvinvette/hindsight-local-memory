@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "hindsight CLI",
+      "type": "python",
+      "request": "launch",
+      "module": "hindsight_local.cli",
+      "args": ["--help"],
+      "console": "integratedTerminal"
+    }
+  ]
+}
