@@ -42,7 +42,7 @@ cd hindsight-local-memory
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
-python scripts/init_db.py --db ./.hindsight/hindsight.db
+python scripts/init_db.py --db ./.hindsight/agent-mem.db
 python examples/basic_ingest.py
 ```
 
@@ -51,11 +51,58 @@ The project works without `sqlite-vec` or FalkorDB installed. Those integrations
 ## CLI
 
 ```bash
-hindsight init --db ./.hindsight/hindsight.db
-hindsight ingest --db ./.hindsight/hindsight.db --text "Calvin is designing a local-first memory system."
-hindsight search --db ./.hindsight/hindsight.db --query "local memory system"
-hindsight export-sync --db ./.hindsight/hindsight.db --out ./sync-bundle.jsonl
+agent-mem init --db ./.hindsight/agent-mem.db
+agent-mem ingest --db ./.hindsight/agent-mem.db --text "Calvin is designing a local-first memory system."
+agent-mem search --db ./.hindsight/agent-mem.db --query "local memory system"
+agent-mem export-sync --db ./.hindsight/agent-mem.db --out ./sync-bundle.jsonl
 ```
+
+## Environment Variables
+
+The CLI and library honor the `HINDSIGHT_DB` environment variable as a convenience for locating the SQLite file. Precedence for the database path is:
+
+- CLI `--db` argument (highest priority)
+- `HINDSIGHT_DB` environment variable
+- Default: `agent-mem.db` (used when neither CLI argument nor env var is provided)
+
+Examples:
+
+- Use an environment variable so commands don't need `--db` every time:
+
+```bash
+export HINDSIGHT_DB=./.hindsight/agent-mem.db
+agent-mem ingest --text "Note saved via env var"
+```
+
+- Override the environment with an explicit CLI argument:
+
+```bash
+export HINDSIGHT_DB=./.hindsight/agent-mem.db
+agent-mem ingest --db ./other/agent-mem.db --text "This goes to other/agent-mem.db"
+```
+
+Notes:
+
+- The `agent-mem init` / `agent-mem ingest` / `agent-mem search` and sync commands will resolve the DB path using the precedence above.
+- Library classes such as `SQLiteMemoryStore` also fall back to `HINDSIGHT_DB` when a path is not supplied programmatically.
+
+## Optional Integrations: sqlite-vec and FalkorDB
+
+This project ships lightweight adapters for two optional integrations: `sqlite-vec` (local vector indexing) and FalkorDB (graph projection). They are optional extras and are not required for the core functionality.
+
+Install the extras via pip:
+
+```bash
+pip install -e .[falkordb]
+pip install -e .[sqlite-vec]
+```
+
+Notes:
+
+- `sqlite-vec` is an SQLite extension that may require platform-specific build or a prebuilt binary. The code includes a fallback which stores embeddings as JSON in the database and performs a naive in-Python similarity search when the extension is not available.
+- FalkorDB projection requires a running FalkorDB instance and the `falkordb` Python client; see the FalkorDB docs for startup instructions. The adapter will raise a helpful error if the client library is not installed.
+
+
 
 ## Directory Layout
 

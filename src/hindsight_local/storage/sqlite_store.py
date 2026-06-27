@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any, Iterable
@@ -12,7 +13,11 @@ from hindsight_local.sync.events import MemoryEvent
 
 
 class SQLiteMemoryStore:
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path | None = None):
+        # Precedence: explicit argument > HINDSIGHT_DB env var > default 'agent-mem.db'
+        if db_path is None:
+            env_db = os.environ.get("HINDSIGHT_DB")
+            db_path = env_db if env_db else "agent-mem.db"
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 

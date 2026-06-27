@@ -10,7 +10,7 @@ MYPY ?= $(PYTHON) -m mypy
 BUILD ?= $(PYTHON) -m build
 PACKAGE_EXTRAS ?= dev
 
-DB ?= ./.hindsight/hindsight.db
+DB ?= ./.hindsight/agent-mem.db
 SYNC_BUNDLE ?= ./sync-bundle.jsonl
 CONFIG_SCRIPT ?= ./scripts/configure-env.sh
 
@@ -24,7 +24,7 @@ DEPLOY_IMAGE ?= $(if $(REMOTE_IMAGE),$(REMOTE_IMAGE),$(IMAGE_REF))
 DEPLOY_COMMAND ?=
 DEPLOY_TOOL ?=
 
-.PHONY: help init install dev configure-init configure-setup configure-setup-ci configure-status configure-edit configure-update test test-cov lint lint-fix format type-check quality build clean clean-venv db-init demo zip docker-build docker-run docker-tag docker-push docker-build-push deploy-image deploy
+.PHONY: help init install dev configure-init configure-setup configure-setup-ci configure-status configure-edit configure-update test test-cov lint lint-fix format type-check quality build clean clean-venv db-init demo zip docker-build docker-run docker-tag docker-push docker-build-push deploy-image deploy vector-add-entry vector-regenerate graph-add-entry graph-regenerate
 
 help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_.-]+:.*##/ {printf "  %-24s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -96,6 +96,18 @@ db-init: install ## Initialize the local SQLite database at DB.
 demo: install db-init ## Run the basic ingest and recall demo.
 	$(PYTHON) examples/basic_ingest.py
 
+vector-add-entry: install ## Ingest text and populate the vector fallback table.
+	$(PYTHON) scripts/vector_add_entry.py --db "$(DB)" --text "$(TEXT)"
+
+vector-regenerate: install ## Rebuild the vector fallback table from existing documents.
+	$(PYTHON) scripts/vector_regenerate.py --db "$(DB)"
+
+graph-add-entry: install ## Project a document or edge into FalkorDB.
+	$(PYTHON) scripts/graph_add_entry.py --db "$(DB)" --kind "$(KIND)" $(if $(DOC_ID),--doc-id "$(DOC_ID)",) $(if $(TITLE),--title "$(TITLE)",) $(if $(METADATA),--metadata "$(METADATA)",) $(if $(SOURCE_ID),--source-id "$(SOURCE_ID)",) $(if $(RELATION),--relation "$(RELATION)",) $(if $(TARGET_ID),--target-id "$(TARGET_ID)",)
+
+graph-regenerate: install ## Rebuild FalkorDB projections from existing SQLite records.
+	$(PYTHON) scripts/graph_regenerate.py --db "$(DB)"
+
 zip: ## Create a distributable project zip one directory above the repo.
 	cd .. && zip -r hindsight-local-memory.zip hindsight-local-memory -x 'hindsight-local-memory/.venv/*' 'hindsight-local-memory/.hindsight/*' 'hindsight-local-memory/.pytest_cache/*' 'hindsight-local-memory/.ruff_cache/*' 'hindsight-local-memory/.mypy_cache/*' 'hindsight-local-memory/dist/*' 'hindsight-local-memory/build/*'
 
@@ -106,7 +118,7 @@ docker-build: ## Build a container image with docker or podman.
 
 docker-run: ## Run the local container image.
 	@test -n "$(CONTAINER_ENGINE)" || { echo "docker or podman is required for docker-run."; exit 127; }
-	$(CONTAINER_ENGINE) run --rm -it -v "$$(pwd)/.hindsight:/app/.hindsight" "$(IMAGE_REF)" hindsight --help
+	$(CONTAINER_ENGINE) run --rm -it -v "$$(pwd)/.hindsight:/app/.hindsight" "$(IMAGE_REF)" agent-mem --help
 
 docker-tag: ## Tag IMAGE_REF as REMOTE_IMAGE.
 	@test -n "$(CONTAINER_ENGINE)" || { echo "docker or podman is required for docker-tag."; exit 127; }
