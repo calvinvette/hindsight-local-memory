@@ -1,0 +1,28 @@
+flowchart LR
+    U[User / App] --> AG[HindsightMemoryAgent]
+    AG --> SS[SQLiteStore]
+    AG --> VEC[SQLiteVecAdapter]
+    AG --> FK[FalkorDB Lite]
+    SS --> DB[SQLite DB]
+    VEC --> IDX[sqlite-vec extension or fallback table]
+    IDX --> DB
+
+    subgraph SQLite
+      SS --> DB
+    end
+
+    subgraph VectorIndex
+      VEC --> IDX
+      IDX --> DB
+    end
+
+    subgraph GraphProjection
+      AG --> FK
+    end
+
+    AG -->|ingest_text/add_edge| SS
+    AG -->|recall query| SS
+    AG -->|optional vector recall| VEC
+    AG -->|project graph edges| FK
+    SS -->|persist documents and edges| DB
+    FK -->|local KB queries| AG

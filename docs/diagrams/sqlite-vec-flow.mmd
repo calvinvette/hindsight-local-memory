@@ -1,0 +1,21 @@
+flowchart LR
+    U[User / App] --> AG[HindsightMemoryAgent]
+    AG --> SS[SQLiteStore]
+    AG --> VEC[SQLiteVecAdapter]
+    SS --> DB[SQLite DB]
+    VEC --> IDX[sqlite-vec extension or fallback table]
+    IDX --> DB
+
+    subgraph SQLite
+      SS --> DB
+    end
+
+    subgraph VectorIndex
+      VEC --> IDX
+      IDX --> DB
+    end
+
+    AG -->|recall query| SS
+    AG -->|optional vector search| VEC
+    SS -->|FTS search or query access| DB
+    VEC -->|vector index access| DB

@@ -1,0 +1,13 @@
+flowchart LR
+    U[User / App] --> CLI[CLI]
+    CLI --> AG[HindsightMemoryAgent]
+    AG --> SS[SQLiteStore]
+    SS --> DB[SQLite DB]
+
+    AG -->|init/connect| SS
+    AG -->|ingest text| SS
+    AG -->|search chunks| SS
+    AG -->|export sync| SS
+
+    SS -->|INSERT document/chunks/sync_events| DB
+    SS -->|SELECT from chunks_fts| DB

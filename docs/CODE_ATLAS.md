@@ -11,34 +11,7 @@ The architecture is intentionally lightweight and designed for offline or air-ga
 
 ## Pure SQLite Flow
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant CLI
-    participant Agent
-    participant SQLiteStore
-    participant SQLiteDB
-
-    User->>CLI: run agent-mem ingest/search/export-sync
-    CLI->>Agent: create HindsightMemoryAgent(db_path)
-    Agent->>SQLiteStore: init/connect
-    Note over Agent,SQLiteStore: SQLite is the durable local store
-
-    alt ingest
-        Agent->>SQLiteStore: ingest_text(text)
-        SQLiteStore->>SQLiteDB: INSERT document/chunks/sync_events
-        SQLiteDB-->>SQLiteStore: OK
-        Agent-->>CLI: result
-    else search
-        Agent->>SQLiteStore: search_chunks_fts(query)
-        SQLiteStore->>SQLiteDB: SELECT from chunks_fts
-        SQLiteDB-->>SQLiteStore: rows
-        Agent-->>CLI: hits
-    else export
-        Agent->>SQLiteStore: export_sync_bundle(out_path)
-        SQLiteStore-->>CLI: file path
-    end
-```
+![Pure SQLite flow](docs/diagrams/sqlite-flow.png)
 
 ### Key points
 
@@ -48,29 +21,7 @@ sequenceDiagram
 
 ## Optional sqlite-vec Flow
 
-```mermaid
-flowchart LR
-    A[User / App] --> B[Agent]
-    B --> C[SQLiteStore]
-    B --> D[SQLiteVecAdapter]
-    D --> E[sqlite-vec extension or fallback table]
-    C --> F[SQLite DB]
-
-    subgraph Pure SQLite
-      C --> F
-    end
-
-    subgraph Vector Index
-      D --> E
-      E --> F
-    end
-
-    B --> G[Recall(query)]
-    G --> H[SQLiteStore.search_chunks_fts]
-    H --> F
-    G --> I[Optional vector search using SQLiteVecAdapter]
-    I --> F
-```
+![Optional sqlite-vec flow](docs/diagrams/sqlite-vec-flow.png)
 
 ### Vector flow details
 
@@ -81,25 +32,7 @@ flowchart LR
 
 ## Optional FalkorDB Lite Flow
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant Agent
-    participant SQLiteStore
-    participant FalkorLite
-
-    User->>Agent: HindsightMemoryAgent(enable_falkordb=True)
-    Agent->>FalkorLite: connect()
-    Note over Agent,FalkorLite: FalkorDB Lite is a local graph projection runtime
-
-    User->>Agent: remember/relate/project
-    Agent->>SQLiteStore: ingest_text/add_edge
-    SQLiteStore->>SQLiteDB: persist document/edge
-    Agent->>FalkorLite: project_document/project_edge/project_claim
-    FalkorLite-->>Agent: projection OK
-
-    User->>FalkorLite: local graph query
-```
+![Optional FalkorDB Lite flow](docs/diagrams/falkordb-lite-flow.png)
 
 ### FalkorDB Lite notes
 
@@ -107,6 +40,16 @@ sequenceDiagram
 - The local SQLite DB remains the primary knowledge base.
 - The adapter supports a local FalkorDB Lite instance via the same lightweight `falkordb` client.
 - This repository targets local KB semantics rather than full enterprise graph replication.
+
+## Combined sqlite-vec + FalkorDB Lite Flow
+
+![Combined sqlite-vec + FalkorDB Lite flow](docs/diagrams/sqlite-vec-falkordb-flow.png)
+
+### Combined optional flow notes
+
+- Both vector search and graph projection are optional extensions on top of SQLite.
+- The SQLite store remains authoritative while `sqlite-vec` indexes embeddings and FalkorDB Lite projects graph semantics.
+- This path supports local KB use cases with both semantic retrieval and graph exploration.
 
 ## Component map
 

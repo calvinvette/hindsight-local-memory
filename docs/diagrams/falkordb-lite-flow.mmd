@@ -1,0 +1,18 @@
+flowchart LR
+    U[User / App] --> AG[HindsightMemoryAgent]
+    AG --> SS[SQLiteStore]
+    AG --> FK[FalkorDB Lite]
+    SS --> DB[SQLite DB]
+
+    AG -->|ingest_text/add_edge| SS
+    AG -->|project_document/project_edge/project_claim| FK
+    SS -->|persist document/edge| DB
+    FK -->|graph query results| AG
+
+    subgraph SQLite
+      SS --> DB
+    end
+
+    subgraph FalkorDB_Lite
+      AG --> FK
+    end
