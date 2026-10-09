@@ -48,6 +48,49 @@ python examples/basic_ingest.py
 
 The project works without `sqlite-vec` or FalkorDB installed. Those integrations are isolated behind adapters so you can add them later.
 
+## Install From GitHub
+
+Use the installer directly from raw GitHub content:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/calvinvette/hindsight-local-memory/main/scripts/install-hindsight.sh | bash
+```
+
+```bash
+wget -qO- https://raw.githubusercontent.com/calvinvette/hindsight-local-memory/main/scripts/install-hindsight.sh | bash
+```
+
+The installer prompts for:
+
+- Install variant: `node` or `python`.
+- Install target: project-local (`npm install`), local virtualenv (`python -m venv` + `pip install`), or global (`npm -g` / system `pip`).
+- Memory mode: `project` or `global`.
+
+You can run non-interactively with environment variables:
+
+```bash
+HINDSIGHT_INSTALL_VARIANT=python \
+HINDSIGHT_INSTALL_TARGET=venv \
+HINDSIGHT_MEMORY_MODE=project \
+curl -fsSL https://raw.githubusercontent.com/calvinvette/hindsight-local-memory/main/scripts/install-hindsight.sh | bash
+```
+
+```bash
+HINDSIGHT_INSTALL_VARIANT=node \
+HINDSIGHT_INSTALL_TARGET=global \
+HINDSIGHT_MEMORY_MODE=global \
+wget -qO- https://raw.githubusercontent.com/calvinvette/hindsight-local-memory/main/scripts/install-hindsight.sh | bash
+```
+
+Variant command lines:
+
+- Node (project): `npm install --save hindsight-local-memory`
+- Node (global): `npm install -g hindsight-local-memory`
+- Python wheel (local venv): `python3 -m venv .venv && . .venv/bin/activate && python -m pip install "https://github.com/calvinvette/hindsight-local-memory/releases/download/v0.1.0/hindsight_local_memory-0.1.0-py3-none-any.whl"`
+- Python wheel (global): `python3 -m pip install "https://github.com/calvinvette/hindsight-local-memory/releases/download/v0.1.0/hindsight_local_memory-0.1.0-py3-none-any.whl"`
+
+If your wheel URL differs, set `HINDSIGHT_PYTHON_WHL_URL` before running the installer.
+
 ## CLI
 
 ```bash
@@ -57,13 +100,48 @@ agent-mem search --db ./.hindsight/agent-mem.db --query "local memory system"
 agent-mem export-sync --db ./.hindsight/agent-mem.db --out ./sync-bundle.jsonl
 ```
 
+## MCP Interface
+
+The package now includes an MCP stdio server binary:
+
+```bash
+agent-mem-mcp
+```
+
+This server supports the stateless MCP protocol release `2026-07-28`.
+
+- No session handshake is required.
+- Clients can optionally call `server/discover` to fetch capabilities and supported protocol versions.
+- `tools/list` includes cache hints (`ttlMs` and `cacheScope`).
+- Legacy `initialize` is still accepted for backward compatibility.
+
+The MCP tools include:
+
+- `memory_config`
+- `memory_init`
+- `memory_remember`
+- `memory_search`
+- `memory_relate`
+- `memory_export_sync`
+- `memory_import_sync`
+
+Each tool accepts optional `memory_scope` (`project` or `global`), `project_root`, and `db_path` to support multi-agent setups sharing either one global DB or one DB per project.
+
 ## Environment Variables
 
 The CLI and library honor the `HINDSIGHT_DB` environment variable as a convenience for locating the SQLite file. Precedence for the database path is:
 
 - CLI `--db` argument (highest priority)
 - `HINDSIGHT_DB` environment variable
-- Default: `agent-mem.db` (used when neither CLI argument nor env var is provided)
+- Scope-aware default from `HINDSIGHT_MEMORY_SCOPE`:
+  - `project` (default): `./.hindsight/agent-mem.db` under the active project root
+  - `global`: `~/.hindsight/agent-mem.db`
+
+Optional scope controls:
+
+- `HINDSIGHT_MEMORY_SCOPE`: `project` or `global`
+- `HINDSIGHT_PROJECT_ROOT`: explicit root used when scope is `project`
+- `HINDSIGHT_GLOBAL_HOME`: explicit directory used when scope is `global`
 
 Examples:
 

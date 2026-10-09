@@ -19,6 +19,7 @@ falkordb = ["falkordb>=1.0"]
 
 [project.scripts]
 agent-mem = "hindsight_local.cli:main"
+agent-mem-mcp = "hindsight_local.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

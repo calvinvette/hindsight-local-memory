@@ -2,29 +2,26 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import sqlite3
 from pathlib import Path
 from typing import Any, Iterable
 
 from hindsight_local.ids import chunk_id, document_id, hash_id
 from hindsight_local.models import Chunk, Document, GraphEdge, utc_now_iso
+from hindsight_local.paths import resolve_memory_location
 from hindsight_local.sync.events import MemoryEvent
 
 
 class SQLiteMemoryStore:
     def __init__(self, db_path: str | Path | None = None):
-        # Precedence: explicit argument > HINDSIGHT_DB env var > default 'agent-mem.db'
-        if db_path is None:
-            env_db = os.environ.get("HINDSIGHT_DB")
-            db_path = env_db if env_db else "agent-mem.db"
-        self.db_path = Path(db_path)
+        self.db_path = resolve_memory_location(db_path=db_path).db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
     def connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 

@@ -2,21 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 
 from hindsight_local.agent.memory_agent import HindsightMemoryAgent
+from hindsight_local.paths import resolve_memory_location
 from hindsight_local.storage.sqlite_store import SQLiteMemoryStore
 from hindsight_local.sync.bundles import export_sync_bundle, import_sync_bundle
 
 
 def get_db_path(cli_db: str | None = None) -> str:
-    """Get database path with precedence: CLI arg > ENV var > default."""
-    if cli_db is not None:
-        return cli_db
-    env_db = os.environ.get("HINDSIGHT_DB")
-    if env_db:
-        return env_db
-    return "agent-mem.db"
+    """Get database path with precedence: CLI arg > ENV var > scope defaults."""
+    return str(resolve_memory_location(db_path=cli_db).db_path)
 
 
 def main() -> None:

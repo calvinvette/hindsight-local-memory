@@ -9,6 +9,17 @@ def test_ingest_and_search(tmp_path):
     assert hits
 
 
-def test_default_db_name_uses_agent_mem_basename():
+def test_default_db_name_uses_agent_mem_basename(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HINDSIGHT_DB", raising=False)
+    monkeypatch.delenv("HINDSIGHT_MEMORY_SCOPE", raising=False)
     store = SQLiteMemoryStore()
     assert store.db_path.name == "agent-mem.db"
+
+
+def test_default_db_path_is_project_local(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("HINDSIGHT_DB", raising=False)
+    monkeypatch.delenv("HINDSIGHT_MEMORY_SCOPE", raising=False)
+    store = SQLiteMemoryStore()
+    assert store.db_path == (tmp_path / ".hindsight" / "agent-mem.db").resolve()
