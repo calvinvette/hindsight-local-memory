@@ -29,20 +29,49 @@ class SQLiteMemoryStore:
         with self.connect() as conn:
             conn.executescript(SCHEMA)
 
-    def ingest_text(self, text: str, source_uri: str = "local:text", title: str | None = None) -> Document:
+    def ingest_text(
+        self, text: str, source_uri: str = "local:text", title: str | None = None
+    ) -> Document:
         content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
         doc = Document(document_id(source_uri, text), source_uri, title, content_hash)
-        chunks = [Chunk(chunk_id(doc.doc_id, i, c), doc.doc_id, i, c) for i, c in enumerate(chunk_text(text))]
+        chunks = [
+            Chunk(chunk_id(doc.doc_id, i, c), doc.doc_id, i, c)
+            for i, c in enumerate(chunk_text(text))
+        ]
         with self.connect() as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO documents VALUES (?, ?, ?, ?, ?, ?)",
-                (doc.doc_id, doc.source_uri, doc.title, doc.content_hash, doc.created_at, json.dumps(doc.metadata)),
+                (
+                    doc.doc_id,
+                    doc.source_uri,
+                    doc.title,
+                    doc.content_hash,
+                    doc.created_at,
+                    json.dumps(doc.metadata),
+                ),
             )
             conn.executemany(
                 "INSERT OR IGNORE INTO chunks VALUES (?, ?, ?, ?, ?, ?)",
-                [(c.chunk_id, c.doc_id, c.chunk_index, c.text, c.created_at, json.dumps(c.metadata)) for c in chunks],
+                [
+                    (
+                        c.chunk_id,
+                        c.doc_id,
+                        c.chunk_index,
+                        c.text,
+                        c.created_at,
+                        json.dumps(c.metadata),
+                    )
+                    for c in chunks
+                ],
             )
-            self._append_event(conn, MemoryEvent.create("upsert_document", doc.doc_id, {"document": doc.__dict__, "chunks": [c.__dict__ for c in chunks]}))
+            self._append_event(
+                conn,
+                MemoryEvent.create(
+                    "upsert_document",
+                    doc.doc_id,
+                    {"document": doc.__dict__, "chunks": [c.__dict__ for c in chunks]},
+                ),
+            )
         return doc
 
     def search_chunks_fts(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
@@ -60,12 +89,27 @@ class SQLiteMemoryStore:
             ).fetchall()
             return [dict(r) for r in rows]
 
-    def add_edge(self, source_id: str, relation: str, target_id: str, metadata: dict[str, Any] | None = None) -> GraphEdge:
-        edge = GraphEdge(hash_id("edge", {"s": source_id, "r": relation, "t": target_id}), source_id, relation, target_id, metadata=metadata or {})
+    def add_edge(
+        self, source_id: str, relation: str, target_id: str, metadata: dict[str, Any] | None = None
+    ) -> GraphEdge:
+        edge = GraphEdge(
+            hash_id("edge", {"s": source_id, "r": relation, "t": target_id}),
+            source_id,
+            relation,
+            target_id,
+            metadata=metadata or {},
+        )
         with self.connect() as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO graph_edges VALUES (?, ?, ?, ?, ?, ?)",
-                (edge.edge_id, edge.source_id, edge.relation, edge.target_id, edge.created_at, json.dumps(edge.metadata)),
+                (
+                    edge.edge_id,
+                    edge.source_id,
+                    edge.relation,
+                    edge.target_id,
+                    edge.created_at,
+                    json.dumps(edge.metadata),
+                ),
             )
             self._append_event(conn, MemoryEvent.create("link", edge.edge_id, edge.__dict__))
         return edge
@@ -81,7 +125,11 @@ class SQLiteMemoryStore:
         with self.connect() as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO sync_events(event_id, event_json, created_at) VALUES (?, ?, ?)",
-                (event["event_id"], json.dumps(event, sort_keys=True), event.get("ingested_at", utc_now_iso())),
+                (
+                    event["event_id"],
+                    json.dumps(event, sort_keys=True),
+                    event.get("ingested_at", utc_now_iso()),
+                ),
             )
 
     def _append_event(self, conn: sqlite3.Connection, event: MemoryEvent) -> None:
