@@ -1,0 +1,247 @@
+# Hindsight Local Memory vs. Memorilla
+
+## Scope and snapshot
+
+This compares the Hindsight Local Memory repository with the local checkout of
+[Memorilla](https://github.com/snap-stanford/memorilla). The comparison is based
+on repository documentation and source code, not an independent reproduction of
+Memorilla's paper results.
+
+Repositories inspected:
+
+- Hindsight Local Memory: commit `5a3b47edb05490cf60ec03a20509b1bf5ee04540`
+- Memorilla: commit `005854d13ced2dfe56588fb721eb78db5ec13f6a`
+- Snapshot date: 2026-10-20
+
+## Executive summary
+
+These projects address different parts of an agent-memory system and are not
+direct substitutes:
+
+- **Hindsight Local Memory** is intended to be a small, local-first persistence
+  layer. It stores documents and chunks in SQLite, offers lexical search and
+  agent-facing interfaces, and models portable sync events. Its design
+  emphasizes durable local state, a small core dependency footprint, and
+  operation in constrained or disconnected settings.
+- **Memorilla** is a research and modeling project. It trains a neural module
+  to compress a collection of document embeddings and a question into a fixed
+  number of latent memory tokens for a frozen language model. Its focus is
+  question-conditioned context compression, benchmark performance, and
+  training recipes—not durable storage or memory synchronization.
+
+In practical terms, Hindsight answers **where and how memory is retained and
+managed**; Memorilla answers **how a known collection can be represented
+compactly for a particular question**. A hybrid could use Hindsight for
+persistence and Memorilla as an optional inference-time compressor, but that
+integration does not exist in either project today.
+
+## Side-by-side comparison
+
+| Area | Hindsight Local Memory | Memorilla |
+|---|---|---|
+| Main purpose | Local-first agent memory storage and integration | Learned, question-conditioned compression of documents into latent tokens |
+| Primary abstraction | Documents, chunks, entities, claims, graph edges, and sync events | Document/question embeddings, a trainable memory module, and decoder prompt embeddings |
+| Runtime and language | Python 3.10+ package; SQLite-backed | Python 3.11 research stack; PyTorch, Lightning, Transformers, and vLLM |
+| Persistence | SQLite is the declared durable source of truth | No general-purpose durable memory database; datasets, embeddings, and model checkpoints are stored as files |
+| Retrieval/compression | SQLite FTS5 chunk search is wired into the façade; vector support is optional and incomplete in this checkout | Learned slots attend to question and document embeddings to produce a fixed number of decoder-space memory tokens |
+| Memory size | Stored memories grow with ingested documents and events | Default is 16 output tokens per question, regardless of the number of source documents; some RL recipes use 8 |
+| Learning | No training pipeline is present in Hindsight | The memory module is trained from data; decoder and embedding encoder are generally frozen |
+| Interfaces | `agent-mem` CLI, Python façade, and MCP stdio server | Python inference API plus training, evaluation, and baseline scripts |
+| Sync/distribution | Append-only event records and JSONL bundle import/export are part of the design | No cross-device memory synchronization protocol |
+| Typical hardware | Core storage and lexical retrieval are lightweight and local | README installation and examples target Linux/CUDA; recipes use multiple H100 GPUs for training and a GPU for inference |
+| Best fit | Retain, query, and move agent memories across local projects or devices | Fit a fixed context budget while answering from a large supplied collection |
+
+## Architecture and data flow
+
+### Hindsight Local Memory
+
+The intended flow is:
+
+```text
+text -> document/chunks -> SQLite -> lexical search
+                         -> append-only sync events -> JSONL bundle
+                         -> optional vector or graph integrations
+```
+
+SQLite is authoritative. The schema includes documents, chunks, entities,
+claims, graph edges, sync events, and tombstones. Document ingestion currently
+creates a document and text chunks; search uses SQLite FTS5. Project/global
+database locations and a focused set of MCP tools support agent integration.
+Stable content-derived IDs, WAL mode, and portable event bundles align with
+Hindsight's local durability and sync goals.
+
+Implementation status is narrower than the architecture's aspirational
+surface:
+
+- The core store has document/chunk ingestion and FTS search, but there is no
+  implemented extraction pipeline that populates entities or claims from
+  ingested text.
+- The optional vector adapter is explicitly described in source as a
+  placeholder. The façade's `recall` path calls FTS search; it does not use
+  vector ranking.
+- FalkorDB is an optional projection and is not the authoritative store or the
+  default retrieval path.
+- Sync export writes events to JSONL. Import currently inserts event records
+  into the local event log; it does not replay those events to reconstruct
+  documents, chunks, or edges. Conflict adjudication is listed as future work
+  in the README.
+
+So today Hindsight's strongest working foundation is local SQLite durability,
+chunk-level lexical search, and agent-facing plumbing. Semantic retrieval,
+automated knowledge extraction, and complete replication/reconciliation need
+further implementation.
+
+### Memorilla
+
+The inference path is:
+
+```text
+documents + question
+  -> frozen embedding encoder
+  -> learned MemoryModule
+  -> fixed-size memory-token embeddings
+  -> frozen decoder prompt -> answer
+```
+
+The memory module initializes learned slots (or, in a retrieval-initialized
+configuration, question-similar document slots), conditions them on the
+question embedding, and refines them through attention over document
+embeddings. It then projects the resulting slots to the decoder's embedding
+space. The runtime inserts those vectors at reserved memory-token positions
+before generation.
+
+Memorilla therefore compresses the supplied collection for an answer; it does
+not itself provide an always-on store that ingests facts, manages scopes,
+updates records, or synchronizes state between devices. A caller supplies the
+documents and question, and the model computes the latent representation.
+Training and evaluation are substantial workflows involving dataset configs,
+precomputed embeddings, checkpoints, and GPU-backed inference.
+
+## Strengths and tradeoffs
+
+### Hindsight strengths
+
+- A clear SQLite authority and local file-based deployment model.
+- Core storage and FTS search do not require a hosted service or model
+  download.
+- Scope-aware project/global locations and CLI/MCP interfaces make it natural
+  to attach to existing agent runtimes.
+- Event and bundle concepts establish a foundation for portable synchronization.
+
+### Hindsight tradeoffs and gaps
+
+- FTS search is lexical; the current façade does not provide a working
+  end-to-end semantic retrieval path.
+- Several modeled concepts (entities and claims) are not populated by an
+  extraction workflow.
+- Imported events are not replayed into materialized memory records, so the
+  current import path is not yet full state replication.
+- It does not learn a task-specific compressor or produce a bounded latent
+  context representation.
+
+### Memorilla strengths
+
+- A fixed small number of query-conditioned tokens can represent information
+  from a much larger collection without placing all source text in the
+  language-model prompt.
+- The learned module can be trained for different benchmark or personalization
+  tasks; the repository also documents reward-based TextWorld training.
+- The project includes data preparation, training, evaluation, and
+  text-only-baseline tooling, making it useful for research comparisons.
+
+The README reports that its benchmark results outperform selected comparison
+methods on average and gives examples such as 84.33% vs. 80.43% on FactKG.
+These are claims reported by the project and are not independently validated
+here.
+
+### Memorilla tradeoffs
+
+- It is a model component and research stack, not a complete persistent memory
+  service: ingestion lifecycle, scoped storage, deletion/update policy, and
+  synchronization are outside its core abstraction.
+- The documented installation depends on a heavy GPU/ML stack, and training
+  recipes require large datasets, precomputed embeddings, and substantial GPU
+  time.
+- Its latent representation is useful only when the target decoder/runtime can
+  accept the injected prompt embeddings and the appropriate encoder and
+  checkpoint are available.
+- As a learned compressor, it introduces model/checkpoint selection and
+  training/evaluation requirements that a lightweight local storage layer
+  does not have.
+
+## Can they be combined?
+
+Yes, at an architectural boundary rather than by merging their core data
+models:
+
+1. Hindsight could remain the durable store for source documents, chunks,
+   metadata, and sync events.
+2. A caller could select a relevant document collection using Hindsight's
+   retrieval facilities, then pass the question and documents to a
+   Memorilla-backed adapter.
+3. Memorilla could return a bounded latent prompt to a compatible decoder.
+4. Hindsight could retain source provenance and any resulting explicit
+   memories or conversation records separately; latent tokens alone are not a
+   replacement for a durable, inspectable record.
+
+This would be an optional accelerator/inference adapter, not a replacement for
+SQLite. Before integrating, the boundary would need to specify supported
+encoder/decoder/checkpoint combinations, document limits and ordering,
+provenance, cache behavior, failure fallback, and hardware requirements.
+Hindsight's current `memory_search` produces text chunks, while Memorilla's
+module consumes embeddings, so an embedding and runtime adapter would also be
+needed.
+
+## Practical opportunities for Hindsight
+
+1. **Complete semantic retrieval as an optional feature.** Replace the demo
+   hashing embedder and placeholder vector-table setup with a supported local
+   embedding backend and tested query/upsert/search behavior. Keep lexical
+   FTS as the dependency-light baseline.
+2. **Make sync imports materialize state.** Define event versioning,
+   idempotent replay, conflict/tombstone behavior, and tests proving that an
+   exported bundle can reconstruct the intended records.
+3. **Wire the knowledge schema to ingestion.** Add explicit, provenance-aware
+   entity/claim extraction only if it fits the project's local-first
+   dependency goals.
+4. **Treat Memorilla as an optional adapter experiment.** Benchmark end-to-end
+   latency, memory use, answer quality, hardware cost, and fallback behavior
+   against Hindsight's simpler retrieval paths before taking on the dependency
+   footprint.
+
+## Recommendation
+
+Keep the project boundaries distinct. Hindsight should continue to be
+positioned as the local persistence, interface, and synchronization layer;
+Memorilla is a candidate learned compressor for a specialized inference path.
+The best near-term Hindsight priorities are to finish the declared vector and
+sync behaviors and to make implementation status explicit. A Memorilla
+integration becomes relevant when a deployment has a large document collection,
+a strict prompt budget, and compatible model hardware—and should remain
+optional so the lightweight storage use case is preserved.
+
+## Sources
+
+### Hindsight Local Memory
+
+- [README](../README.md)
+- [SQLite store and FTS schema](../src/hindsight_local/storage/sqlite_store.py)
+- [Vector adapter](../src/hindsight_local/storage/vector_store.py)
+- [Agent façade](../src/hindsight_local/agent/memory_agent.py)
+- [Memory scope resolution](../src/hindsight_local/paths.py)
+- [MCP tool definitions](../src/hindsight_local/mcp_server.py)
+- [Sync bundle implementation](../src/hindsight_local/sync/bundles.py)
+- [FalkorDB projection](../src/hindsight_local/graph/falkordb_projection.py)
+
+### Memorilla
+
+All source references below are pinned to inspected commit
+[`005854d`](https://github.com/snap-stanford/memorilla/tree/005854d13ced2dfe56588fb721eb78db5ec13f6a).
+
+- [README and reported results](https://github.com/snap-stanford/memorilla/blob/005854d13ced2dfe56588fb721eb78db5ec13f6a/README.md)
+- [Memory module](https://github.com/snap-stanford/memorilla/blob/005854d13ced2dfe56588fb721eb78db5ec13f6a/memorilla/memory.py)
+- [vLLM inference wrapper](https://github.com/snap-stanford/memorilla/blob/005854d13ced2dfe56588fb721eb78db5ec13f6a/memorilla/vllm.py)
+- [Training implementation](https://github.com/snap-stanford/memorilla/blob/005854d13ced2dfe56588fb721eb78db5ec13f6a/train.py)
+- [Data and embedding documentation](https://github.com/snap-stanford/memorilla/blob/005854d13ced2dfe56588fb721eb78db5ec13f6a/docs/data.md)
+- [Training documentation](https://github.com/snap-stanford/memorilla/blob/005854d13ced2dfe56588fb721eb78db5ec13f6a/docs/training.md)
+- [TextWorld reinforcement-learning setup](https://github.com/snap-stanford/memorilla/blob/005854d13ced2dfe56588fb721eb78db5ec13f6a/rl/README.md)

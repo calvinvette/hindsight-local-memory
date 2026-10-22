@@ -1,0 +1,290 @@
+# Hindsight Local Memory vs. Mem0
+
+## Scope and snapshot
+
+This compares Hindsight Local Memory in this repository with the local checkout
+of [Mem0](https://github.com/mem0ai/mem0). The comparison focuses on the
+open-source SDK and the self-hosted option visible in the checked-out
+repository. Mem0 Platform capabilities and benchmark results are identified as
+platform-reported rather than assumed to be available in the OSS SDK.
+
+Repositories inspected:
+
+- Hindsight Local Memory: commit `5a3b47edb05490cf60ec03a20509b1bf5ee04540`
+- Mem0: commit `0724291bd864cf807e88ee8981c8226644e8fb42`
+- Snapshot date: 2026-10-20
+
+## Executive summary
+
+Both projects provide agent-oriented memory APIs, but they make different
+tradeoffs:
+
+- **Hindsight Local Memory** is a small local-first memory substrate. Its
+  central design is SQLite durability, project/global scope resolution, lexical
+  chunk retrieval, and portable event bundles. The core works without a model
+  provider or remote service.
+- **Mem0 OSS** is a configurable memory service/library. Its normal `add`
+  pipeline uses an LLM to extract memory facts, embeds and stores them in a
+  configurable vector store, links entities, and supports scoped semantic
+  retrieval and memory lifecycle operations. It has synchronous and
+  asynchronous APIs, Python and TypeScript SDKs, a CLI, many integrations, and
+  a self-hosted server option.
+
+The key choice is between **local, inspectable, minimal storage plumbing**
+and **a richer, model-backed memory processing and retrieval stack**.
+Hindsight is better suited to deployments prioritizing local operation and
+control over every durable record. Mem0 offers substantially more built-in
+extraction, retrieval, and integration functionality, at the cost of more
+dependencies, model configuration, and operational choices. Mem0's hosted
+Platform is a separate managed offering; its features and published scores
+should not be conflated with the OSS library.
+
+## Side-by-side comparison
+
+| Area | Hindsight Local Memory | Mem0 OSS |
+|---|---|---|
+| Primary purpose | Local-first persistence and interfaces for agent memory | Model-backed extraction, semantic memory storage, and retrieval |
+| Core abstraction | Documents, chunks, entities, claims, edges, sync events | Extracted memory items, their embeddings/payloads, history, and linked entities |
+| Default durable memory store | SQLite documents/chunks and event log | Configurable vector store holds memory records; SQLite stores message and change history |
+| Default retrieval | SQLite FTS5 lexical search over chunks | Semantic vector retrieval plus keyword BM25 where supported and entity boosts |
+| Memory extraction | No automatic fact extraction pipeline in the current implementation | `add(..., infer=True)` extracts facts with an LLM; `infer=False` stores message text directly |
+| Scope | Project or global database path | `user_id`, `agent_id`, `run_id`, plus metadata filters |
+| Lifecycle | Ingest and relate; update/delete workflows are limited or absent | Get/list/search/update/delete/delete-all/history APIs |
+| Graph/entity behavior | Graph schema and optional FalkorDB projection; no automatic extraction wired into ingestion | Entity extraction and linked entity store support retrieval boosts; v3 OSS does not expose graph traversals as a separate graph-memory API |
+| Sync | Append-only event records and JSONL bundle APIs; import currently does not replay state | No equivalent general-purpose JSONL event-sync protocol in the inspected OSS core |
+| Interfaces | Python façade, CLI, MCP stdio server | Python and TypeScript SDKs, CLI, self-hosted HTTP server, and many agent/framework integrations |
+| Model/runtime requirement | None for core storage and FTS search | LLM and embedder are used by default for inferred adds and semantic search; multiple providers, including local options, are configurable |
+| Best fit | Small offline/local substrate with simple operational model | Personalized memory workflows needing extraction, hybrid retrieval, lifecycle APIs, or broad integration coverage |
+
+## Architecture and data flow
+
+### Hindsight Local Memory
+
+The intended flow is:
+
+```text
+text -> document/chunks -> SQLite -> FTS search
+                         -> append-only events -> JSONL sync bundle
+                         -> optional vector / graph integrations
+```
+
+SQLite is the declared durable source of truth. The implementation creates
+documents and chunks, indexes chunk text with FTS5, and exposes project/global
+path selection. The small MCP toolset covers configuration, initialization,
+remember, search, relate, and sync import/export.
+
+Current implementation boundaries matter:
+
+- The SQLite schema includes entities and claims, but ingestion does not
+  automatically extract or populate them.
+- The façade's recall operation uses FTS5. The optional vector adapter is
+  explicitly a placeholder in source; the included hashing embedder is a demo,
+  not a semantic model.
+- FalkorDB is an optional graph projection, not the local system of record or
+  default retrieval path.
+- Export writes event records to JSONL. Import currently inserts event records
+  into the event log rather than replaying them to reconstruct documents,
+  chunks, or edges.
+
+Hindsight therefore offers a compact persistence and integration base today;
+semantic retrieval, automated knowledge extraction, and complete
+conflict-aware replication are not yet complete end-to-end features.
+
+### Mem0 OSS
+
+The core memory lifecycle in the checked-out Python SDK is approximately:
+
+```text
+messages
+  -> scope validation and recent-session context
+  -> LLM fact extraction (infer=True) or raw message handling (infer=False)
+  -> exact-hash deduplication
+  -> embedding -> configured vector store
+  -> history records in SQLite
+  -> entity extraction/linking in a companion entity collection
+
+query + required scope filters
+  -> query embedding and semantic vector search
+  -> optional BM25 keyword search when the selected store supports it
+  -> entity matching / boosts and score fusion
+  -> optional reranking -> scoped results
+```
+
+The OSS `Memory` class is configurable with factories for LLM, embedding,
+vector-store, and optional reranker providers. The package includes a broad
+set of vector-store adapters. Qdrant is the default vector store and defaults
+to a local `/tmp/qdrant` path; OpenAI is the default LLM and embedding
+provider. The README recommends choosing local providers when avoiding hosted
+model calls is important.
+
+The normal inferred add path in the inspected code is an additive extraction
+pipeline: it gathers prior scoped memories and recent messages, asks the LLM
+for new facts, deduplicates exact hashes, persists embeddings, records history,
+and links extracted entities. Inferred facts accumulate rather than triggering
+automatic semantic update/delete decisions in this v3 path. Explicit
+`update`, `delete`, and `delete_all` APIs are still provided for callers.
+
+SQLite in Mem0 OSS is used for history and recent messages; it is not the
+authoritative store for vectorized memory items. Those items live in the
+configured vector store. Entity linking is backed by a companion vector
+collection in the OSS implementation, and helps retrieval; this is distinct
+from a general graph database with queryable relationship traversal.
+
+### OSS, self-hosted, and Platform boundaries
+
+The repository exposes more than one deployment model:
+
+- **OSS SDK**: Python and TypeScript libraries, configured by the application.
+  The inspected Python implementation stores memory items in a vector store
+  and history/messages in SQLite.
+- **Self-hosted server**: a FastAPI service and dashboard launched with
+  Docker Compose; its README documents Postgres-backed operations and
+  authentication setup.
+- **Mem0 Platform**: a managed service with features not necessarily present
+  in OSS. The root README explicitly says its April 2026 benchmark scores
+  reflect the managed platform, including proprietary optimizations, and OSS
+  users should not expect identical scores. Platform-only temporal parameters
+  are rejected by the OSS Python API.
+
+Thus, the presence of a capability in Mem0's Platform documentation or
+marketing does not by itself establish that it is in the open-source library
+or self-hosted server.
+
+## Strengths and tradeoffs
+
+### Hindsight strengths
+
+- Local SQLite storage and FTS search require no hosted LLM or embedding
+  endpoint.
+- Project/global scopes and the CLI/MCP interfaces make it straightforward to
+  attach to local agent workflows.
+- Stable IDs and explicit event records make provenance and future offline
+  reconciliation natural design goals.
+- Its small core surface is easier to inspect and deploy where external
+  services or heavyweight dependencies are undesirable.
+
+### Hindsight tradeoffs and gaps
+
+- Recall is lexical rather than semantic or hybrid in the current façade.
+- Ingestion does not yet turn conversations into extracted facts or populated
+  entity/claim records.
+- Update/delete lifecycle operations and complete sync replay are not provided
+  as finished workflows.
+- It has fewer ready-made SDKs, vector backends, and framework integrations.
+
+### Mem0 OSS strengths
+
+- Fact extraction, exact deduplication, embeddings, scoped search, entity
+  linking, and history are built into a single memory API.
+- Search fuses semantic ranking with BM25 when supported by the chosen backend,
+  with entity boosts and optional reranking.
+- Explicit update/delete/history operations support a more complete memory
+  lifecycle.
+- Provider factories support many LLM, embedder, and vector-store backends,
+  including local options; the wider repository also includes TypeScript,
+  CLI, and agent integrations.
+- A self-hosted API and dashboard option is available for teams that want
+  centralized service operations without using Mem0's hosted Platform.
+
+### Mem0 OSS tradeoffs
+
+- Inferred memory workflows depend on an LLM and embedder; defaults are
+  OpenAI-based, so users must configure providers and credentials or choose
+  local alternatives.
+- Durable memory data is tied to the configured vector store, while change
+  history and recent messages use a separate SQLite database. This increases
+  configuration and backup considerations relative to one SQLite authority.
+- The large provider and integration surface increases dependency, compatibility,
+  and operational complexity.
+- OSS v3's inferred extraction is additive. It avoids automatic overwrites in
+  that path, but can retain multiple versions of changing facts; consumers need
+  suitable temporal metadata and retrieval policies.
+- Search and hybrid scoring depend on backend capabilities; the implementation
+  warns when keyword search is not supported by the chosen vector store.
+- Managed Platform functionality and reported benchmark scores are not
+  equivalent to what is available in this open-source checkout.
+
+## Can they be combined?
+
+Potentially, but avoid treating either store as a transparent drop-in for the
+other:
+
+1. Hindsight could remain the local source-of-truth for source documents,
+   stable IDs, and sync events.
+2. Mem0 could be used as an optional fact extraction and semantic retrieval
+   service, with a clearly defined scope mapping from Hindsight project/global
+   identities to Mem0's user/agent/run filters.
+3. Each extracted Mem0 fact should retain its Hindsight source document/chunk
+   identifier and provenance in metadata so facts can be traced back and
+   rebuilt.
+4. A design must decide whether Hindsight events or Mem0's vector store is
+   canonical for mutations, deletion, and conflict resolution. Duplicating
+   uncoordinated writes risks divergent copies.
+
+The simplest first experiment is a one-way adapter: select Hindsight text,
+call Mem0 `add`, and query Mem0 for scoped facts without enabling writes back
+to Hindsight. Before production use, test offline operation, latency, provider
+cost, deletion propagation, backup/restore, tenant isolation, and consistency
+after source changes.
+
+## Practical opportunities for Hindsight
+
+1. **Finish the local semantic path.** Add a real local embedding provider and
+   a tested vector-index/query implementation while retaining FTS as the
+   zero-model baseline.
+2. **Complete record lifecycle.** Add explicit update/delete semantics and
+   ensure the durable event log describes every state transition.
+3. **Implement bundle replay.** Add schema/version validation, idempotent
+   application, tombstone and conflict policies, and round-trip reconstruction
+   tests.
+4. **Make extraction and provenance explicit.** If adding LLM-based fact
+   extraction, keep it optional, preserve source IDs, and separate generated
+   fact records from original documents.
+5. **Keep integration scope small.** Mem0 shows the value of a polished
+   developer API and adapters, but Hindsight can preserve its local-first
+   identity by prioritizing a few stable interfaces over a broad provider
+   matrix.
+
+## Recommendation
+
+Hindsight and Mem0 are adjacent, but currently at different levels of
+functionality. Mem0 OSS provides a fuller LLM-backed memory lifecycle and
+semantic retrieval ecosystem. Hindsight has a stronger declared local
+SQLite-authority and event-sync position, but several advanced retrieval and
+sync pieces are still scaffolding rather than complete behavior.
+
+For a local/offline deployment, choose Hindsight when simple SQLite durability
+and minimal model dependencies are the priority, while accounting for its
+current lexical-only recall and incomplete sync replay. Choose Mem0 OSS when
+automatic extraction, hybrid semantic retrieval, lifecycle APIs, and broad
+backend integrations matter and the team can operate/configure its model and
+vector-store stack. Consider Mem0 Platform separately, since it has a distinct
+feature set and the repository's top benchmark scores are Platform results.
+
+## Sources
+
+### Hindsight Local Memory
+
+- [README](../README.md)
+- [SQLite store and FTS schema](../src/hindsight_local/storage/sqlite_store.py)
+- [Vector adapter](../src/hindsight_local/storage/vector_store.py)
+- [Agent façade](../src/hindsight_local/agent/memory_agent.py)
+- [Scope resolution](../src/hindsight_local/paths.py)
+- [MCP tool definitions](../src/hindsight_local/mcp_server.py)
+- [Sync bundle implementation](../src/hindsight_local/sync/bundles.py)
+
+### Mem0
+
+All source references below are pinned to inspected commit
+[`0724291`](https://github.com/mem0ai/mem0/tree/0724291bd864cf807e88ee8981c8226644e8fb42).
+
+- [README and OSS/Platform distinction](https://github.com/mem0ai/mem0/blob/0724291bd864cf807e88ee8981c8226644e8fb42/README.md)
+- [Python Memory implementation](https://github.com/mem0ai/mem0/blob/0724291bd864cf807e88ee8981c8226644e8fb42/mem0/memory/main.py)
+- [SQLite history and message storage](https://github.com/mem0ai/mem0/blob/0724291bd864cf807e88ee8981c8226644e8fb42/mem0/memory/storage.py)
+- [Memory and vector-store configuration](https://github.com/mem0ai/mem0/blob/0724291bd864cf807e88ee8981c8226644e8fb42/mem0/configs/base.py)
+- [Vector-store provider configuration](https://github.com/mem0ai/mem0/blob/0724291bd864cf807e88ee8981c8226644e8fb42/mem0/vector_stores/configs.py)
+- [Package dependencies and extras](https://github.com/mem0ai/mem0/blob/0724291bd864cf807e88ee8981c8226644e8fb42/pyproject.toml)
+- [Repository architecture notes](https://github.com/mem0ai/mem0/blob/0724291bd864cf807e88ee8981c8226644e8fb42/skills/mem0/references/architecture.md)
+- [Self-hosted server](https://github.com/mem0ai/mem0/blob/0724291bd864cf807e88ee8981c8226644e8fb42/server/README.md)
+- [v3 feature and entity-linking notes](https://github.com/mem0ai/mem0/blob/0724291bd864cf807e88ee8981c8226644e8fb42/skills/mem0/references/features.md)
+- [Apache 2.0 license](https://github.com/mem0ai/mem0/blob/0724291bd864cf807e88ee8981c8226644e8fb42/LICENSE)

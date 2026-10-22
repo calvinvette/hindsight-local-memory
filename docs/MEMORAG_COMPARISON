@@ -1,0 +1,251 @@
+# Hindsight Local Memory vs. MemoRAG
+
+## Scope and snapshot
+
+This compares Hindsight Local Memory in this repository with the local checkout
+of [MemoRAG](https://github.com/qhjqhj00/MemoRAG). It is based on repository
+documentation and source code, not an independent reproduction of MemoRAG's
+paper results or performance claims.
+
+Repositories inspected:
+
+- Hindsight Local Memory: commit `5a3b47edb05490cf60ec03a20509b1bf5ee04540`
+- MemoRAG: commit `7c23dfa855289a2a99fe72c98e024105196ce01e`
+- Snapshot date: 2026-10-20
+
+## Executive summary
+
+The two projects use “memory” to mean different things:
+
+- **Hindsight Local Memory** is a local-first persistence and integration layer
+  for agent memories. It records documents and chunks in SQLite, exposes
+  lexical search and agent-facing APIs, and provides a foundation for portable
+  sync events.
+- **MemoRAG** is a memory-augmented retrieval-augmented generation pipeline.
+  It processes a supplied long context with a memory model, uses that model to
+  produce query-specific clues or surrogate queries, retrieves evidence from a
+  dense index, and passes the evidence to a generator.
+
+Hindsight is primarily about **retaining and managing durable memory**.
+MemoRAG is primarily about **answering questions over a large context**. They
+are potentially complementary: Hindsight could persist the source materials
+and MemoRAG could be an optional QA/retrieval path over selected documents.
+Neither project currently integrates with the other.
+
+## Side-by-side comparison
+
+| Area | Hindsight Local Memory | MemoRAG |
+|---|---|---|
+| Primary purpose | Local-first agent memory storage, retrieval, and sync foundation | Memory-enhanced retrieval and generation over a supplied long context |
+| Core abstraction | Documents, chunks, entities, claims, graph edges, sync events | A model-derived memory state plus chunked retrieval corpus and FAISS index |
+| Memory mechanism | Durable records in SQLite; FTS5 search is implemented | LLM context processing into compressed activation/KV state (Beacon memory or long-context KV cache); Lite mode first generates chunk gists |
+| Query path | Query SQLite FTS5 and return matching chunks | Ask memory model for clues/rewrites, dense-search original chunks, then generate from retrieved evidence |
+| Retrieval | SQLite FTS5 works; vector adapter remains a placeholder in this checkout | Dense embeddings via a Transformer encoder and FAISS; supported index/search interfaces are implemented |
+| Persistence | SQLite database is intended as authoritative source of truth | Saves model memory state, FAISS index, and chunk text files in a caller-selected cache directory |
+| Sync | Append-only event records and JSONL import/export APIs | No device-to-device synchronization protocol or durable knowledge store |
+| Interfaces | Python façade, CLI, MCP stdio server | Python package API, notebook examples, and training/evaluation scripts |
+| Model requirements | Core storage/search needs no model download; optional capabilities can be added | Transformer models and a GPU-oriented ML stack are central; external generator API options are available |
+| Main use case | Keep agent memories local, inspectable, scoped, and portable | Answer questions or summarize long documents using global context clues plus retrieved evidence |
+
+## Architecture and data flow
+
+### Hindsight Local Memory
+
+The intended high-level flow is:
+
+```text
+text -> document/chunks -> SQLite -> FTS search
+                         -> append-only events -> JSONL sync bundle
+                         -> optional vector / graph integrations
+```
+
+SQLite is the declared durable authority. The current implementation creates
+documents and chunks, indexes chunk text with FTS5, resolves project/global
+database locations, and exposes a small set of CLI and MCP operations.
+Content-derived IDs and WAL mode support repeatable local writes and concurrent
+access.
+
+There are important implementation boundaries to distinguish from the target
+architecture:
+
+- The store has an entities/claims schema, but there is no implemented
+  extraction pipeline that populates those tables from ingested text.
+- The current `recall` path uses FTS5. The optional vector adapter is described
+  in source as a placeholder; `remember` uses a demo hashing embedder when
+  enabled, not a production semantic embedding model.
+- FalkorDB is an optional projection, not the durable source of truth or
+  default query mechanism.
+- Sync bundle export writes event records. Import currently adds events to the
+  local event log but does not replay them to recreate documents, chunks, or
+  edges. The current import path is therefore not full state replication.
+
+Hindsight's strongest working properties today are local persistence,
+lexical chunk retrieval, and agent integration plumbing. Semantic retrieval,
+knowledge extraction, and conflict-aware replication remain future work.
+
+### MemoRAG
+
+The full pipeline is:
+
+```text
+long context
+  -> memory model processes context and forms reusable model-side memory
+  -> original context split into retrieval chunks
+  -> dense embeddings + FAISS index
+question
+  -> memory model generates clues / surrogate queries
+  -> dense retrieval over original chunks
+  -> generator answers using retrieved evidence
+```
+
+The primary `Memory` implementation supports two memory modes in the checked
+out code:
+
+- MemoRAG Beacon models export compressed model activations from a customized
+  model memory mechanism.
+- Long-context models can process the context into a Transformers KV cache;
+  the implementation optionally reloads the model after forming that cache.
+
+The `MemoRAG` class pairs this memory with a dense retriever and a generator.
+At query time, the memory model can recall text spans and rewrite a question
+into surrogate queries. The pipeline embeds those strings and the original
+question, retrieves FAISS-ranked chunks, and supplies the retrieved passages
+to a generator. The generator can be the memory model, a separate local model,
+or a supported API-backed `Agent`.
+
+`MemoRAGLite` takes a different route: it chunks the long context into
+gist-generation prompts, summarizes each chunk into gists, loads the combined
+gists into a model KV cache, and separately indexes chunks from the original
+context for evidence retrieval. It also stores model memory, the retrieval
+index, and chunk text on disk when a save directory is supplied.
+
+MemoRAG is thus not just a summarizer or vector database. Its defining design
+is to use a model-side global-memory representation to formulate better
+retrieval queries, while grounding final generation with passages retrieved
+from the original context.
+
+## Strengths and tradeoffs
+
+### Hindsight strengths
+
+- SQLite-first local durability with no mandatory model server or model
+  download for core ingestion and FTS search.
+- Project/global scope resolution and CLI/MCP surfaces fit agent-runtime
+  integration.
+- Deterministic identifiers, explicit event records, and JSONL bundles provide
+  a foundation for portable, auditable memory.
+- A natural fit when stored memories must remain inspectable and usable
+  independently of one particular LLM.
+
+### Hindsight tradeoffs and gaps
+
+- Current default recall is lexical, not semantic or model-conditioned.
+- The declared vector, entity, and claim concepts are not yet fully wired into
+  end-to-end workflows.
+- Current bundle import stores event records but does not materialize imported
+  state in the document/chunk tables.
+- It does not include a model that derives global context or generates
+  query-specific retrieval hints.
+
+### MemoRAG strengths
+
+- Memory clues can connect a query to evidence that is not an obvious lexical
+  match; final answers can still be generated from retrieved source passages.
+- It separates memory-model processing, evidence retrieval, and answer
+  generation, with configurable local models and optional API-based generation.
+- It has a cache/save/load path for model memory, FAISS index, and chunks,
+  supporting repeated use of a prepared context.
+- The repository includes Lite-mode code, training scripts and data, and
+  LongBench evaluation examples, not only an inference wrapper.
+
+The README reports context-length capacities, caching speedups, and benchmark
+results. Those figures are project-reported and have not been independently
+validated in this comparison.
+
+### MemoRAG tradeoffs
+
+- The model-side memory is tied to model families and implementation details;
+  it is not a general-purpose, model-independent fact store.
+- Preparing memory and retrieval indexes requires model inference, embedding
+  work, and GPU-oriented dependencies. The README recommends a 24 GiB GPU for
+  Lite mode, while describing operation on lower-memory GPUs under defaults.
+- The saved state is a per-context cache of model state, index, and chunks,
+  rather than a scoped multi-user memory database with explicit record
+  lifecycle, provenance, tombstones, and sync semantics.
+- The standard pipeline loads both memory/generation and retrieval models,
+  which can make deployment and VRAM management more involved than a local
+  SQLite service.
+- The README roadmap still lists inference speed, flexible retrieval
+  integration, and richer memory abilities as goals, so the system should be
+  evaluated against the intended deployment and workload.
+
+## Can they be combined?
+
+Yes, but the systems should remain separate layers:
+
+1. Hindsight can store source documents, metadata, and provenance in SQLite.
+2. An integration can select documents (initially via Hindsight FTS or an
+   external selector) and pass a context to MemoRAG's `memorize` path.
+3. MemoRAG can build its model-side memory and dense chunk index, then answer
+   questions through its clue -> retrieval -> generation flow.
+4. Hindsight can retain source records and explicit conversation outcomes;
+   MemoRAG's model cache should be treated as a derived, rebuildable artifact,
+   not the canonical representation of durable memory.
+
+An integration would need to define cache invalidation when source documents
+change, stable mapping from retrieved chunks to Hindsight IDs, how cache files
+are secured and scoped, supported models and GPUs, and fallback behavior when
+model loading or retrieval fails. Hindsight's current search returns text
+chunks, while MemoRAG's retriever indexes its own chunk list, so an adapter
+must preserve provenance and avoid silently losing source identity.
+
+## Practical opportunities for Hindsight
+
+1. **Finish semantic retrieval as an optional capability.** Add a real local
+   embedding adapter and supported vector index path while retaining FTS as
+   the lightweight baseline.
+2. **Complete sync replay.** Define event schemas, replay semantics,
+   idempotency, conflict/tombstone handling, and reconstruction tests.
+3. **Make source provenance first-class in retrieval responses.** Stable
+   document/chunk identifiers and source metadata are prerequisites for
+   grounded downstream pipelines such as MemoRAG.
+4. **Prototype a model adapter only for relevant workloads.** Compare a
+   MemoRAG-backed path against direct retrieval on answer quality, latency,
+   GPU/VRAM cost, cache invalidation, and operation without a GPU. Keep it
+   optional so Hindsight's lightweight use case remains available.
+
+## Recommendation
+
+Treat MemoRAG as a possible downstream long-context QA/retrieval engine, not as
+a replacement for Hindsight's persistent memory substrate. Hindsight's
+near-term priorities are to complete the retrieval and sync behaviors it
+already models. If a workload needs global context clues for long documents,
+a MemoRAG adapter could be evaluated as an optional layer over Hindsight-held
+source material, with the model cache clearly separated from canonical
+records.
+
+## Sources
+
+### Hindsight Local Memory
+
+- [README](../README.md)
+- [SQLite store and FTS schema](../src/hindsight_local/storage/sqlite_store.py)
+- [Vector adapter](../src/hindsight_local/storage/vector_store.py)
+- [Agent façade](../src/hindsight_local/agent/memory_agent.py)
+- [Scope resolution](../src/hindsight_local/paths.py)
+- [MCP tool definitions](../src/hindsight_local/mcp_server.py)
+- [Sync bundle implementation](../src/hindsight_local/sync/bundles.py)
+
+### MemoRAG
+
+All source references below are pinned to inspected commit
+[`7c23dfa`](https://github.com/qhjqhj00/MemoRAG/tree/7c23dfa855289a2a99fe72c98e024105196ce01e).
+
+- [README, usage, reported benchmarks, and roadmap](https://github.com/qhjqhj00/MemoRAG/blob/7c23dfa855289a2a99fe72c98e024105196ce01e/README.md)
+- [Memory and full MemoRAG pipeline](https://github.com/qhjqhj00/MemoRAG/blob/7c23dfa855289a2a99fe72c98e024105196ce01e/memorag/memorag.py)
+- [Lite pipeline](https://github.com/qhjqhj00/MemoRAG/blob/7c23dfa855289a2a99fe72c98e024105196ce01e/memorag/memorag_lite.py)
+- [Dense retriever and FAISS index](https://github.com/qhjqhj00/MemoRAG/blob/7c23dfa855289a2a99fe72c98e024105196ce01e/memorag/retrieval.py)
+- [Activation Beacon implementation](https://github.com/qhjqhj00/MemoRAG/blob/7c23dfa855289a2a99fe72c98e024105196ce01e/train/src/modeling_beacon.py)
+- [Training entry point](https://github.com/qhjqhj00/MemoRAG/blob/7c23dfa855289a2a99fe72c98e024105196ce01e/train/main/train.py)
+- [Dependencies](https://github.com/qhjqhj00/MemoRAG/blob/7c23dfa855289a2a99fe72c98e024105196ce01e/requirements.txt)
+- [License](https://github.com/qhjqhj00/MemoRAG/blob/7c23dfa855289a2a99fe72c98e024105196ce01e/LICENSE)

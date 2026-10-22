@@ -1,11 +1,11 @@
 # Hindsight Local Memory
 
-A local-first, air-gap-friendly memory node for agentic systems. The project is designed to run locally with SQLite as the durable source of truth, optional `sqlite-vec` for vector search, and optional FalkorDB Lite as a graph query projection. It is intentionally schema-compatible with a larger Hindsight deployment using PostgreSQL/pgvector and Neo4j.
+A local-first, air-gap-friendly memory node for agentic systems. The project is designed to run locally with SQLite as the durable source of truth, optional `sqlite-vec` for vector search, and optional FalkorDB Lite as a graph query projection. For connected deployments, the intended server-side direction is compatible with Databricks Agent Bricks: translate local conversation history to Agent Sessions and let the managed memory pipeline produce Agent Memory, while retaining SQLite as the local authority.
 
 ## Goals
 
 - Local memory for field units, laptops, labs, edge boxes, and disconnected environments.
-- Durable append-only sync log for later reconciliation with a master system.
+- Durable append-only sync log for later translation and delivery to a server-side memory system.
 - Deterministic IDs for documents, chunks, entities, claims, embeddings, and graph edges.
 - Local vector retrieval through SQLite, with graceful fallback if `sqlite-vec` is unavailable.
 - Optional graph projection into FalkorDB Lite.
@@ -34,6 +34,22 @@ Field Unit
   Agent Runtime
     ingest -> extract -> embed -> store -> project -> retrieve -> sync bundle
 ```
+
+## Connected deployment direction
+
+The local node remains independently usable and authoritative when offline.
+When connected, a future adapter should translate ordered local conversation
+items to Agent Bricks Agent Sessions and use the Agent Bricks memory pipeline
+to derive server-side Agent Memory. Do not treat Hindsight documents or raw
+events as direct equivalents of managed memory entries, or write directly to
+Lakebase tables in place of the supported Agent Bricks interfaces. Keep
+delivery retryable and idempotent, and define a single owner for long-term
+memory consolidation to avoid duplicate or conflicting memories.
+
+This integration is a design direction, not a feature currently implemented.
+See the [sync and Agent Bricks compatibility design](./docs/sync-design.md) and
+the [Agent Bricks comparison](./docs/AGENTBRICKS_COMPARISON.md) for the data
+mapping, delivery requirements, and implementation gaps.
 
 ## Quick Start
 
