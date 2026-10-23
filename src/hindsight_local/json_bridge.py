@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
-from typing import Any
+from typing import Any, BinaryIO
 
+from hindsight_local import __version__
 from hindsight_local.models import (
     DebugStackFrame,
     DebuggerStateCapture,
@@ -12,9 +13,31 @@ from hindsight_local.models import (
     EditorStateCapture,
 )
 from hindsight_local.paths import resolve_memory_location
-from hindsight_local.storage.sqlite_store import SQLiteMemoryStore
+from hindsight_local.storage.sqlite_store import (
+    MAX_MEMORY_TEXT_CHARS,
+    MAX_RESULT_CHARS,
+    SQLiteMemoryStore,
+    validate_memory_input,
+)
 
 BRIDGE_VERSION = "hindsight.json-bridge.v1"
+MAX_REQUEST_BYTES = 2 * 1024 * 1024
+DEFAULT_RESULT_CHARS = 2000
+LOCATION_FIELDS = {"db_path", "memory_scope", "project_root"}
+METHODS = (
+    "memory.capabilities",
+    "memory.config",
+    "memory.search",
+    "memory.remember",
+    "memory.relate",
+    "memory.graph_query",
+    "memory.capture_editor_state",
+    "memory.capture_debugger_state",
+    "memory.list_captures",
+    "memory.get_capture",
+    "memory.delete_capture",
+    "memory.delete_document",
+)
 
 
 def handle_request(request: Any) -> dict[str, Any]:
@@ -41,8 +64,21 @@ def handle_request(request: Any) -> dict[str, Any]:
         }
         location = resolve_memory_location(**location_args)
 
-        if method == "memory.config":
-            _require_fields(params, {"db_path", "memory_scope", "project_root"}, set())
+        if method == "memory.capabilities":
+            _require_fields(params, set(), set())
+            result = {
+                "bridge_version": BRIDGE_VERSION,
+                "package_version": __version__,
+                "methods": list(METHODS),
+                "limits": {
+                    "max_request_bytes": MAX_REQUEST_BYTES,
+                    "max_memory_text_chars": MAX_MEMORY_TEXT_CHARS,
+                    "max_result_chars": MAX_RESULT_CHARS,
+                    "default_result_chars": DEFAULT_RESULT_CHARS,
+                },
+            }
+        elif method == "memory.config":
+            _require_fields(params, LOCATION_FIELDS, set())
             result = {
                 "memory_scope": location.memory_scope,
                 "db_path": str(location.db_path),
@@ -51,7 +87,7 @@ def handle_request(request: Any) -> dict[str, Any]:
         elif method == "memory.search":
             _require_fields(
                 params,
-                {"query", "limit", "db_path", "memory_scope", "project_root"},
+                {"query", "limit", "max_chars", *LOCATION_FIELDS},
                 {"query"},
             )
             store = SQLiteMemoryStore(location.db_path)
@@ -61,7 +97,66 @@ def handle_request(request: Any) -> dict[str, Any]:
                 raise ValueError("limit must be an integer between 1 and 100")
             if not isinstance(params["query"], str) or not params["query"]:
                 raise ValueError("query must be a non-empty string")
-            result = {"hits": store.search_chunks_fts(params["query"], limit=limit)}
+            result = {
+                "hits": store.search_chunks_fts(
+                    params["query"],
+                    limit=limit,
+                    max_chars=params.get("max_chars", DEFAULT_RESULT_CHARS),
+                )
+            }
+        elif method == "memory.remember":
+            _require_fields(params, {"text", "source_uri", "title", *LOCATION_FIELDS}, {"text"})
+            source_uri = params.get("source_uri", "bridge:text")
+            title = params.get("title")
+            validate_memory_input(params["text"], source_uri, title)
+            store = SQLiteMemoryStore(location.db_path)
+            store.init()
+            doc = store.ingest_text(params["text"], source_uri=source_uri, title=title)
+            result = {"doc_id": doc.doc_id, "source_uri": doc.source_uri, "title": doc.title}
+        elif method == "memory.relate":
+            _require_fields(
+                params,
+                {"source_id", "relation", "target_id", *LOCATION_FIELDS},
+                {"source_id", "relation", "target_id"},
+            )
+            for field_name in ("source_id", "relation", "target_id"):
+                value = params[field_name]
+                if not isinstance(value, str) or not 1 <= len(value) <= 200:
+                    raise ValueError(f"{field_name} must contain 1 to 200 characters")
+            store = SQLiteMemoryStore(location.db_path)
+            store.init()
+            edge = store.add_edge(params["source_id"], params["relation"], params["target_id"])
+            result = {"edge": edge.__dict__}
+        elif method == "memory.list_captures":
+            _require_fields(params, {"capture_type", "limit", "max_chars", *LOCATION_FIELDS}, set())
+            store = SQLiteMemoryStore(location.db_path)
+            store.init()
+            result = {
+                "captures": store.list_captures(
+                    capture_type=params.get("capture_type"),
+                    limit=params.get("limit", 20),
+                    max_chars=params.get("max_chars", DEFAULT_RESULT_CHARS),
+                )
+            }
+        elif method == "memory.get_capture":
+            _require_fields(params, {"capture_id", "max_chars", *LOCATION_FIELDS}, {"capture_id"})
+            store = SQLiteMemoryStore(location.db_path)
+            store.init()
+            result = {
+                "capture": store.get_capture(
+                    params["capture_id"], max_chars=params.get("max_chars", DEFAULT_RESULT_CHARS)
+                )
+            }
+        elif method == "memory.delete_capture":
+            _require_fields(params, {"capture_id", "reason", *LOCATION_FIELDS}, {"capture_id"})
+            store = SQLiteMemoryStore(location.db_path)
+            store.init()
+            result = store.delete_capture(params["capture_id"], reason=params.get("reason"))
+        elif method == "memory.delete_document":
+            _require_fields(params, {"doc_id", "reason", *LOCATION_FIELDS}, {"doc_id"})
+            store = SQLiteMemoryStore(location.db_path)
+            store.init()
+            result = store.delete_document(params["doc_id"], reason=params.get("reason"))
         elif method == "memory.graph_query":
             _require_fields(
                 params,
@@ -201,22 +296,47 @@ def _require_fields(value: dict[str, Any], allowed: set[str], required: set[str]
         raise ValueError(f"missing required fields: {', '.join(sorted(missing))}")
 
 
+def read_request_line(
+    stream: BinaryIO, limit: int = MAX_REQUEST_BYTES
+) -> tuple[bytes | None, bool]:
+    """Return (line, oversized); line is None at EOF. Oversized lines are drained, not kept."""
+    line = stream.readline(limit + 1)
+    if not line:
+        return None, False
+    if len(line) <= limit or line.endswith(b"\n"):
+        return line, False
+    while True:
+        chunk = stream.readline(65536)
+        if not chunk or chunk.endswith(b"\n"):
+            return b"", True
+
+
 def main() -> None:
-    for line in sys.stdin:
-        if not line.strip():
-            continue
+    while True:
+        raw, oversized = read_request_line(sys.stdin.buffer)
+        if raw is None:
+            return
         request_id: Any = None
-        try:
-            request = json.loads(line)
-            if isinstance(request, dict):
-                request_id = request.get("id")
-            response = handle_request(request)
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        if oversized:
             response = {
                 "version": BRIDGE_VERSION,
-                "id": request_id,
-                "error": {"message": f"invalid JSON: {exc}"},
+                "id": None,
+                "error": {"message": f"request exceeds {MAX_REQUEST_BYTES} bytes"},
             }
+        elif not raw.strip():
+            continue
+        else:
+            try:
+                request = json.loads(raw.decode("utf-8"))
+                if isinstance(request, dict):
+                    request_id = request.get("id")
+                response = handle_request(request)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                response = {
+                    "version": BRIDGE_VERSION,
+                    "id": request_id,
+                    "error": {"message": f"invalid JSON: {exc}"},
+                }
         sys.stdout.write(json.dumps(response, ensure_ascii=True) + "\n")
         sys.stdout.flush()
 

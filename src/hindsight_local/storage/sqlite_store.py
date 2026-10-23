@@ -20,6 +20,34 @@ from hindsight_local.paths import resolve_memory_location
 from hindsight_local.sync.events import MemoryEvent
 
 CAPTURE_SCHEMA_VERSION = "hindsight.capture.v1"
+MAX_MEMORY_TEXT_CHARS = 100_000
+MAX_RESULT_CHARS = 100_000
+CAPTURE_TYPES = {"editor", "debugger"}
+
+
+def validate_memory_input(text: Any, source_uri: Any, title: Any) -> None:
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("text must be a non-empty string")
+    if len(text) > MAX_MEMORY_TEXT_CHARS:
+        raise ValueError(f"text exceeds the {MAX_MEMORY_TEXT_CHARS} character limit")
+    if not isinstance(source_uri, str) or not 1 <= len(source_uri) <= 4096:
+        raise ValueError("source_uri must contain 1 to 4096 characters")
+    if title is not None and (not isinstance(title, str) or len(title) > 500):
+        raise ValueError("title must be a string of at most 500 characters")
+
+
+def _check_max_chars(max_chars: Any) -> int | None:
+    if max_chars is None:
+        return None
+    if type(max_chars) is not int or not 1 <= max_chars <= MAX_RESULT_CHARS:
+        raise ValueError(f"max_chars must be an integer between 1 and {MAX_RESULT_CHARS}")
+    return max_chars
+
+
+def _check_object_id(name: str, value: Any) -> str:
+    if not isinstance(value, str) or not 1 <= len(value) <= 200:
+        raise ValueError(f"{name} must contain 1 to 200 characters")
+    return value
 
 
 class SQLiteMemoryStore:
@@ -99,7 +127,10 @@ class SQLiteMemoryStore:
         )
         return doc
 
-    def search_chunks_fts(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+    def search_chunks_fts(
+        self, query: str, limit: int = 10, max_chars: int | None = None
+    ) -> list[dict[str, Any]]:
+        max_chars = _check_max_chars(max_chars)
         with self.connect() as conn:
             rows = conn.execute(
                 """
@@ -112,7 +143,155 @@ class SQLiteMemoryStore:
                 """,
                 (query, limit),
             ).fetchall()
-            return [dict(r) for r in rows]
+        hits = [dict(r) for r in rows]
+        if max_chars is not None:
+            for hit in hits:
+                if len(hit["text"]) > max_chars:
+                    hit["text"] = hit["text"][:max_chars]
+                    hit["text_truncated"] = True
+        return hits
+
+    def list_captures(
+        self,
+        capture_type: str | None = None,
+        limit: int = 20,
+        max_chars: int | None = 2000,
+    ) -> list[dict[str, Any]]:
+        if capture_type is not None and capture_type not in CAPTURE_TYPES:
+            raise ValueError("capture_type must be 'editor' or 'debugger'")
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("limit must be an integer between 1 and 100")
+        max_chars = _check_max_chars(max_chars)
+        where = "WHERE capture_type = ?" if capture_type else ""
+        params: list[Any] = [capture_type] if capture_type else []
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT capture_id, capture_type, captured_at, content, metadata_json, doc_id,
+                       schema_version
+                FROM context_captures {where}
+                ORDER BY captured_at DESC, capture_id
+                LIMIT ?
+                """,
+                [*params, limit],
+            ).fetchall()
+        return [self._bounded_capture(self._capture_record(row), max_chars) for row in rows]
+
+    def get_capture(self, capture_id: str, max_chars: int | None = None) -> dict[str, Any] | None:
+        _check_object_id("capture_id", capture_id)
+        max_chars = _check_max_chars(max_chars)
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT capture_id, capture_type, captured_at, content, metadata_json, doc_id,
+                       schema_version
+                FROM context_captures WHERE capture_id = ?
+                """,
+                (capture_id,),
+            ).fetchone()
+        return self._bounded_capture(self._capture_record(row), max_chars) if row else None
+
+    @staticmethod
+    def _bounded_capture(record: dict[str, Any], max_chars: int | None) -> dict[str, Any]:
+        content = record["content"]
+        if max_chars is not None and content is not None and len(content) > max_chars:
+            record["content"] = content[:max_chars]
+            record["content_truncated"] = True
+        return record
+
+    def delete_capture(self, capture_id: str, reason: str | None = None) -> dict[str, Any]:
+        _check_object_id("capture_id", capture_id)
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT doc_id FROM context_captures WHERE capture_id = ?", (capture_id,)
+            ).fetchone()
+            if row is None:
+                return {"deleted": False, "object_id": capture_id}
+            conn.execute("DELETE FROM context_captures WHERE capture_id = ?", (capture_id,))
+            removed = self._scrub(conn, [capture_id], [row["doc_id"]])
+            self._record_forget(conn, capture_id, "capture", reason)
+        return {"deleted": True, "object_id": capture_id, "removed": removed}
+
+    def delete_document(self, doc_id: str, reason: str | None = None) -> dict[str, Any]:
+        _check_object_id("doc_id", doc_id)
+        with self.connect() as conn:
+            if (
+                conn.execute("SELECT 1 FROM documents WHERE doc_id = ?", (doc_id,)).fetchone()
+                is None
+            ):
+                return {"deleted": False, "object_id": doc_id}
+            owner = conn.execute(
+                "SELECT capture_id FROM context_captures WHERE doc_id = ?", (doc_id,)
+            ).fetchone()
+            if owner is not None:
+                raise ValueError(
+                    f"document belongs to capture '{owner['capture_id']}'; delete the capture instead"
+                )
+            removed = self._scrub(conn, [], [doc_id])
+            self._record_forget(conn, doc_id, "document", reason)
+        return {"deleted": True, "object_id": doc_id, "removed": removed}
+
+    def _scrub(
+        self, conn: sqlite3.Connection, object_ids: list[str], doc_ids: list[str | None]
+    ) -> dict[str, int]:
+        """Remove derived rows and any content-bearing sync events for the given objects."""
+        docs = [d for d in doc_ids if d]
+        chunk_ids: list[str] = []
+        if docs:
+            marks = ",".join("?" for _ in docs)
+            chunk_ids = [
+                r["chunk_id"]
+                for r in conn.execute(
+                    f"SELECT chunk_id FROM chunks WHERE doc_id IN ({marks})", docs
+                )
+            ]
+        linked = [*object_ids, *docs, *chunk_ids]
+        edge_ids: list[str] = []
+        if linked:
+            marks = ",".join("?" for _ in linked)
+            edge_ids = [
+                r["edge_id"]
+                for r in conn.execute(
+                    f"SELECT edge_id FROM graph_edges WHERE source_id IN ({marks}) "
+                    f"OR target_id IN ({marks})",
+                    [*linked, *linked],
+                )
+            ]
+        if edge_ids:
+            marks = ",".join("?" for _ in edge_ids)
+            conn.execute(f"DELETE FROM graph_edges WHERE edge_id IN ({marks})", edge_ids)
+        if docs:
+            marks = ",".join("?" for _ in docs)
+            has_fallback = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = 'embeddings_fallback'"
+            ).fetchone()
+            if has_fallback:
+                conn.execute(f"DELETE FROM embeddings_fallback WHERE doc_id IN ({marks})", docs)
+            conn.execute(f"DELETE FROM documents WHERE doc_id IN ({marks})", docs)
+        event_objects = [*object_ids, *docs, *edge_ids]
+        events = 0
+        if event_objects:
+            marks = ",".join("?" for _ in event_objects)
+            events = conn.execute(
+                f"DELETE FROM sync_events WHERE json_extract(event_json, '$.object_id') IN ({marks})",
+                event_objects,
+            ).rowcount
+        return {"chunks": len(chunk_ids), "edges": len(edge_ids), "events": events}
+
+    def _record_forget(
+        self, conn: sqlite3.Connection, object_id: str, object_type: str, reason: str | None
+    ) -> None:
+        if reason is not None and (not isinstance(reason, str) or len(reason) > 500):
+            raise ValueError("reason must be a string of at most 500 characters")
+        conn.execute(
+            "INSERT OR REPLACE INTO tombstones(object_id, object_type, reason, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (object_id, object_type, reason, utc_now_iso()),
+        )
+        self._append_event(
+            conn,
+            MemoryEvent.create("forget", object_id, {"object_type": object_type, "reason": reason}),
+        )
 
     def capture_editor_state(self, capture: EditorStateCapture) -> dict[str, Any]:
         metadata = {
@@ -576,6 +755,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(chunk_id UNINDEXED, tex
 
 CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
   INSERT INTO chunks_fts(rowid, chunk_id, text) VALUES (new.rowid, new.chunk_id, new.text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+  DELETE FROM chunks_fts WHERE rowid = old.rowid;
 END;
 
 CREATE TABLE IF NOT EXISTS entities (

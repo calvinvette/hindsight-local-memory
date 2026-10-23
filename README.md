@@ -166,9 +166,22 @@ agent-mem bridge
 Send one JSON request per line. Each response contains the matching `id`, the
 bridge version (`hindsight.json-bridge.v1`), and either `result` or `error`.
 Requests may include the same version to fail fast on incompatible versions.
-The supported methods are `memory.config`,
-`memory.search`, `memory.graph_query`, `memory.capture_editor_state`, and
-`memory.capture_debugger_state`. For example:
+Call `memory.capabilities` first: it returns the bridge and package versions,
+the supported method list, and the size limits, so a client can adapt to older
+or newer HLM installs. Request lines larger than 2 MiB are rejected without
+being buffered.
+
+The supported methods are `memory.capabilities`, `memory.config`,
+`memory.search`, `memory.remember`, `memory.relate`, `memory.graph_query`,
+`memory.capture_editor_state`, `memory.capture_debugger_state`,
+`memory.list_captures`, `memory.get_capture`, `memory.delete_capture`, and
+`memory.delete_document`. Search, list, and get results are truncated per item
+(2000 characters by default, adjustable with `max_chars`) and flag
+`text_truncated` or `content_truncated`. Deleting a capture or document removes
+its chunks, search-index rows, embeddings, graph edges, and the content copies
+in the local sync log, and leaves a content-free tombstone and `forget` event so
+a later sync can propagate the deletion. Delete and list operations are
+intentionally not exposed as MCP tools. For example:
 
 ```json
 {"id":1,"method":"memory.graph_query","params":{"seed_id":"entity_123","depth":2,"limit":25}}

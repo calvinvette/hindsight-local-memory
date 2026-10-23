@@ -12,7 +12,7 @@ from hindsight_local.models import (
     EditorStateCapture,
 )
 from hindsight_local.paths import MemoryLocation, resolve_memory_location
-from hindsight_local.storage.sqlite_store import SQLiteMemoryStore
+from hindsight_local.storage.sqlite_store import SQLiteMemoryStore, validate_memory_input
 from hindsight_local.sync.bundles import export_sync_bundle, import_sync_bundle
 
 SERVER_NAME = "hindsight-local-memory-mcp"
@@ -145,6 +145,7 @@ def _tool_definitions() -> list[dict[str, Any]]:
                 "properties": {
                     "query": {"type": "string"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                    "max_chars": {"type": "integer", "minimum": 1, "maximum": 100000},
                     "memory_scope": {"type": "string", "enum": ["project", "global"]},
                     "project_root": {"type": "string"},
                     "db_path": {"type": "string"},
@@ -366,6 +367,9 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         )
 
     if name == "memory_remember":
+        validate_memory_input(
+            arguments.get("text"), arguments.get("source_uri", "mcp:text"), arguments.get("title")
+        )
         agent = HindsightMemoryAgent(db_path_str)
         result = agent.remember(
             text=arguments["text"],
@@ -375,8 +379,13 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return _tool_text_result({"db_path": db_path_str, "result": result})
 
     if name == "memory_search":
-        agent = HindsightMemoryAgent(db_path_str)
-        hits = agent.recall(arguments["query"], int(arguments.get("limit", 5)))
+        store = SQLiteMemoryStore(db_path_str)
+        store.init()
+        hits = store.search_chunks_fts(
+            arguments["query"],
+            int(arguments.get("limit", 5)),
+            max_chars=arguments.get("max_chars"),
+        )
         return _tool_text_result({"db_path": db_path_str, "hits": hits})
 
     if name == "memory_graph_query":
