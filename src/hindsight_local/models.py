@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 
 def utc_now_iso() -> str:
@@ -59,6 +60,47 @@ class GraphEdge:
     target_id: str
     created_at: str = field(default_factory=utc_now_iso)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class EditorSelectionRange:
+    start_line: int
+    start_character: int
+    end_line: int
+    end_character: int
+
+
+@dataclass(frozen=True)
+class EditorStateCapture:
+    language_id: str | None = None
+    document_uri: str | None = None
+    workspace_id: str | None = None
+    session_id: str | None = None
+    selection_range: EditorSelectionRange | None = None
+    selected_text: str | None = None
+    capture_id: str = field(default_factory=lambda: f"cap_{uuid4().hex}")
+    captured_at: str = field(default_factory=utc_now_iso)
+
+
+@dataclass(frozen=True)
+class DebugStackFrame:
+    name: str
+    source_uri: str | None = None
+    line: int | None = None
+    column: int | None = None
+
+
+@dataclass(frozen=True)
+class DebuggerStateCapture:
+    debug_type: str
+    state: str
+    session_name: str | None = None
+    reason: str | None = None
+    workspace_id: str | None = None
+    session_id: str | None = None
+    stack_frames: list[DebugStackFrame] = field(default_factory=list)
+    capture_id: str = field(default_factory=lambda: f"cap_{uuid4().hex}")
+    captured_at: str = field(default_factory=utc_now_iso)
 
 
 def to_dict(obj: Any) -> dict[str, Any]:

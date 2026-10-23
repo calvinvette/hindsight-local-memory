@@ -4,6 +4,7 @@ import argparse
 import json
 
 from hindsight_local.agent.memory_agent import HindsightMemoryAgent
+from hindsight_local import json_bridge
 from hindsight_local.paths import resolve_memory_location
 from hindsight_local.storage.sqlite_store import SQLiteMemoryStore
 from hindsight_local.sync.bundles import export_sync_bundle, import_sync_bundle
@@ -40,9 +41,16 @@ def main() -> None:
     p_import.add_argument("--db", default=None)
     p_import.add_argument("--infile", required=True)
 
+    sub.add_parser(
+        "bridge",
+        help="Serve the versioned line-delimited JSON API for local integrations (non-MCP).",
+    )
+
     args = parser.parse_args()
 
-    if args.cmd == "init":
+    if args.cmd == "bridge":
+        json_bridge.main()
+    elif args.cmd == "init":
         db_path = get_db_path(args.db)
         SQLiteMemoryStore(db_path).init()
         print(json.dumps({"ok": True, "db": db_path}))

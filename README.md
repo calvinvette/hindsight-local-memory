@@ -137,11 +137,47 @@ The MCP tools include:
 - `memory_init`
 - `memory_remember`
 - `memory_search`
+- `memory_graph_query`
+- `memory_capture_editor_state`
+- `memory_capture_debugger_state`
 - `memory_relate`
 - `memory_export_sync`
 - `memory_import_sync`
 
 Each tool accepts optional `memory_scope` (`project` or `global`), `project_root`, and `db_path` to support multi-agent setups sharing either one global DB or one DB per project.
+
+Editor captures store typed editor/workspace/session metadata and optional
+user-selected text. Debugger captures store typed session state and bounded
+stack-frame metadata; variable values and debug-console contents are not
+accepted. Capture records are local and can be searched when selected text is
+included. Graph queries are read-only and bound traversal depth and result
+count.
+
+## Local JSON Bridge
+
+For integrations where MCP is unavailable or disabled by policy, the CLI
+provides a separate line-delimited JSON interface over the same HLM library
+and SQLite store:
+
+```bash
+agent-mem bridge
+```
+
+Send one JSON request per line. Each response contains the matching `id`, the
+bridge version (`hindsight.json-bridge.v1`), and either `result` or `error`.
+Requests may include the same version to fail fast on incompatible versions.
+The supported methods are `memory.config`,
+`memory.search`, `memory.graph_query`, `memory.capture_editor_state`, and
+`memory.capture_debugger_state`. For example:
+
+```json
+{"id":1,"method":"memory.graph_query","params":{"seed_id":"entity_123","depth":2,"limit":25}}
+```
+
+The bridge is a non-MCP local process interface, not a policy bypass. It still
+requires authorization to launch the HLM executable and access its configured
+local database. Follow the environment's approved extension/process and data
+handling policies.
 
 ## Environment Variables
 

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any, Optional
 
-from hindsight_local.ids import hash_id
+from hindsight_local.models import DebuggerStateCapture, EditorStateCapture
 from hindsight_local.storage.sqlite_store import SQLiteMemoryStore
 from hindsight_local.storage.vector_store import SQLiteVecAdapter
 from hindsight_local.graph.falkordb_projection import FalkorDBProjection, FalkorProjectionConfig
@@ -42,6 +41,8 @@ class HindsightMemoryAgent:
 
     def _ensure_vector_table(self) -> None:
         """Create vector table (sqlite-vec) or fallback table."""
+        if self.vec_adapter is None:
+            raise RuntimeError("Vector adapter is not enabled.")
         conn = self.store.connect()
         self.vec_adapter.ensure_vector_table(conn)
         conn.close()
@@ -73,6 +74,21 @@ class HindsightMemoryAgent:
     def recall(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
         return self.store.search_chunks_fts(query, limit=limit)
 
+    def query_graph(
+        self,
+        seed_id: str | None = None,
+        relation: str | None = None,
+        depth: int = 1,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        return self.store.query_graph(seed_id, relation, depth, limit)
+
+    def capture_editor_state(self, capture: EditorStateCapture) -> dict[str, Any]:
+        return self.store.capture_editor_state(capture)
+
+    def capture_debugger_state(self, capture: DebuggerStateCapture) -> dict[str, Any]:
+        return self.store.capture_debugger_state(capture)
+
     def relate(self, source_id: str, relation: str, target_id: str) -> dict[str, Any]:
         edge = self.store.add_edge(source_id, relation, target_id)
         return edge.__dict__
@@ -88,12 +104,16 @@ class HindsightMemoryAgent:
         if self.falkordb is not None:
             self.falkordb.project_edge(source_id, relation, target_id)
 
-    def project_document(self, doc_id: str, title: str | None = None, metadata: dict | None = None) -> None:
+    def project_document(
+        self, doc_id: str, title: str | None = None, metadata: dict | None = None
+    ) -> None:
         """Project a document into FalkorDB."""
         if self.falkordb is not None:
             self.falkordb.project_document(doc_id, title, metadata)
 
-    def project_claim(self, claim_id: str, subject_id: str, predicate: str, object_value: str) -> None:
+    def project_claim(
+        self, claim_id: str, subject_id: str, predicate: str, object_value: str
+    ) -> None:
         """Project a claim into FalkorDB."""
         if self.falkordb is not None:
             self.falkordb.project_claim(claim_id, subject_id, predicate, object_value)

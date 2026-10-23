@@ -5,6 +5,12 @@ import sys
 from typing import Any
 
 from hindsight_local.agent.memory_agent import HindsightMemoryAgent
+from hindsight_local.models import (
+    DebugStackFrame,
+    DebuggerStateCapture,
+    EditorSelectionRange,
+    EditorStateCapture,
+)
 from hindsight_local.paths import MemoryLocation, resolve_memory_location
 from hindsight_local.storage.sqlite_store import SQLiteMemoryStore
 from hindsight_local.sync.bundles import export_sync_bundle, import_sync_bundle
@@ -73,6 +79,19 @@ def _resolve_tool_location(arguments: dict[str, Any]) -> MemoryLocation:
     )
 
 
+def _validate_tool_arguments(
+    arguments: dict[str, Any], allowed: set[str], required: set[str]
+) -> None:
+    if not isinstance(arguments, dict):
+        raise ValueError("tool arguments must be an object")
+    unexpected = set(arguments) - allowed
+    missing = required - set(arguments)
+    if unexpected:
+        raise ValueError(f"unexpected arguments: {', '.join(sorted(unexpected))}")
+    if missing:
+        raise ValueError(f"missing required arguments: {', '.join(sorted(missing))}")
+
+
 def _tool_definitions() -> list[dict[str, Any]]:
     tools = [
         {
@@ -131,6 +150,117 @@ def _tool_definitions() -> list[dict[str, Any]]:
                     "db_path": {"type": "string"},
                 },
                 "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "memory_graph_query",
+            "description": (
+                "Run a bounded, read-only graph traversal over local HLM nodes and edges. "
+                "Provide a seed_id to expand neighbors, or omit it to return recent edges."
+            ),
+            "annotations": {"readOnlyHint": True},
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "seed_id": {"type": "string", "maxLength": 200},
+                    "relation": {"type": "string", "maxLength": 200},
+                    "depth": {"type": "integer", "minimum": 0, "maximum": 3, "default": 1},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50},
+                    "memory_scope": {"type": "string", "enum": ["project", "global"]},
+                    "project_root": {"type": "string"},
+                    "db_path": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "memory_capture_editor_state",
+            "description": (
+                "Persist explicitly approved VS Code editor metadata and optional selected text "
+                "as a typed local HLM capture. Do not pass unreviewed file contents."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "capture_id": {"type": "string", "maxLength": 200},
+                    "language_id": {"type": "string", "maxLength": 200},
+                    "document_uri": {"type": "string", "maxLength": 4096},
+                    "workspace_id": {"type": "string", "maxLength": 200},
+                    "session_id": {"type": "string", "maxLength": 200},
+                    "selection_range": {
+                        "type": "object",
+                        "properties": {
+                            "start_line": {"type": "integer", "minimum": 0},
+                            "start_character": {"type": "integer", "minimum": 0},
+                            "end_line": {"type": "integer", "minimum": 0},
+                            "end_character": {"type": "integer", "minimum": 0},
+                        },
+                        "required": [
+                            "start_line",
+                            "start_character",
+                            "end_line",
+                            "end_character",
+                        ],
+                        "additionalProperties": False,
+                    },
+                    "selected_text": {"type": "string", "maxLength": 100000},
+                    "captured_at": {"type": "string", "maxLength": 100},
+                    "memory_scope": {"type": "string", "enum": ["project", "global"]},
+                    "project_root": {"type": "string"},
+                    "db_path": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "memory_capture_debugger_state",
+            "description": (
+                "Persist explicitly approved debugger session metadata and stack frames as a "
+                "typed local HLM capture. Do not include variable values, expressions, or "
+                "debug-console contents."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "capture_id": {"type": "string", "maxLength": 200},
+                    "debug_type": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "state": {
+                        "type": "string",
+                        "enum": [
+                            "started",
+                            "continued",
+                            "stopped",
+                            "terminated",
+                            "exception",
+                            "unknown",
+                        ],
+                    },
+                    "session_name": {"type": "string", "maxLength": 500},
+                    "reason": {"type": "string", "maxLength": 1000},
+                    "workspace_id": {"type": "string", "maxLength": 200},
+                    "session_id": {"type": "string", "maxLength": 200},
+                    "stack_frames": {
+                        "type": "array",
+                        "maxItems": 100,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "minLength": 1, "maxLength": 500},
+                                "source_uri": {"type": "string", "maxLength": 4096},
+                                "line": {"type": "integer", "minimum": 0},
+                                "column": {"type": "integer", "minimum": 0},
+                            },
+                            "required": ["name"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "captured_at": {"type": "string", "maxLength": 100},
+                    "memory_scope": {"type": "string", "enum": ["project", "global"]},
+                    "project_root": {"type": "string"},
+                    "db_path": {"type": "string"},
+                },
+                "required": ["debug_type", "state"],
                 "additionalProperties": False,
             },
         },
@@ -248,6 +378,106 @@ def _call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         agent = HindsightMemoryAgent(db_path_str)
         hits = agent.recall(arguments["query"], int(arguments.get("limit", 5)))
         return _tool_text_result({"db_path": db_path_str, "hits": hits})
+
+    if name == "memory_graph_query":
+        _validate_tool_arguments(
+            arguments,
+            {
+                "seed_id",
+                "relation",
+                "depth",
+                "limit",
+                "memory_scope",
+                "project_root",
+                "db_path",
+            },
+            set(),
+        )
+        store = SQLiteMemoryStore(db_path_str)
+        store.init()
+        graph = store.query_graph(
+            seed_id=arguments.get("seed_id"),
+            relation=arguments.get("relation"),
+            depth=arguments.get("depth", 1),
+            limit=arguments.get("limit", 50),
+        )
+        return _tool_text_result({"db_path": db_path_str, **graph})
+
+    if name == "memory_capture_editor_state":
+        allowed_fields = {
+            "capture_id",
+            "language_id",
+            "document_uri",
+            "workspace_id",
+            "session_id",
+            "selection_range",
+            "selected_text",
+            "captured_at",
+            "memory_scope",
+            "project_root",
+            "db_path",
+        }
+        _validate_tool_arguments(arguments, allowed_fields, set())
+        capture_fields = {
+            key: arguments[key]
+            for key in (
+                "capture_id",
+                "captured_at",
+                "language_id",
+                "document_uri",
+                "workspace_id",
+                "session_id",
+                "selected_text",
+            )
+            if key in arguments
+        }
+        range_data = arguments.get("selection_range")
+        if range_data is not None:
+            capture_fields["selection_range"] = EditorSelectionRange(**range_data)
+        editor_capture = EditorStateCapture(**capture_fields)
+        store = SQLiteMemoryStore(db_path_str)
+        store.init()
+        result = store.capture_editor_state(editor_capture)
+        return _tool_text_result({"db_path": db_path_str, "capture": result})
+
+    if name == "memory_capture_debugger_state":
+        allowed_fields = {
+            "capture_id",
+            "debug_type",
+            "state",
+            "session_name",
+            "reason",
+            "workspace_id",
+            "session_id",
+            "stack_frames",
+            "captured_at",
+            "memory_scope",
+            "project_root",
+            "db_path",
+        }
+        _validate_tool_arguments(arguments, allowed_fields, {"debug_type", "state"})
+        capture_fields = {
+            key: arguments[key]
+            for key in (
+                "capture_id",
+                "captured_at",
+                "debug_type",
+                "state",
+                "session_name",
+                "reason",
+                "workspace_id",
+                "session_id",
+            )
+            if key in arguments
+        }
+        capture_fields["stack_frames"] = [
+            DebugStackFrame(**frame) for frame in arguments.get("stack_frames", [])
+        ]
+        debugger_capture = DebuggerStateCapture(**capture_fields)
+        store = SQLiteMemoryStore(db_path_str)
+        store.init()
+        result = store.capture_debugger_state(debugger_capture)
+        return _tool_text_result({"db_path": db_path_str, "capture": result})
 
     if name == "memory_relate":
         agent = HindsightMemoryAgent(db_path_str)
